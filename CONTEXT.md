@@ -8,6 +8,8 @@
 **Propósito:** investigar y desarrollar una aplicación Android propia para recibir mediciones de un telémetro láser Milessey M120 Pro, construir planos sencillos y exportarlos a DXF.
 **Etapa:** prototipo Android BLE/editor geométrico con importación y exportación DXF estándar; falta validación visual en LibreCAD y persistencia nativa de proyectos.
 
+**Distribución:** proyecto Android de código abierto bajo licencia MIT (`LICENSE`); mínimo configurado Android 7.0 / API 24 con BLE obligatorio. La compatibilidad real entre versiones/dispositivos requiere pruebas. Las capturas públicas de la app se ubican en `docs/screenshots/`, separadas de los mockups de `android/Design/`.
+
 La investigación BLE detallada se conserva en notas personales externas que no forman parte de este repositorio público. Este `CONTEXT.md` es la referencia compartible para el alcance y las observaciones técnicas confirmadas.
 
 ## Alcance acordado del MVP
