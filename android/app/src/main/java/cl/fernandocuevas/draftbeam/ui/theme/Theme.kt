@@ -1,32 +1,32 @@
 package cl.fernandocuevas.draftbeam.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
 
-private val TokyoNightColorScheme = darkColorScheme(
-    primary = Color(0xFF7AA2F7),
-    onPrimary = Color(0xFF16161E),
-    secondary = Color(0xFFBB9AF7),
-    onSecondary = Color(0xFF1A1B26),
-    tertiary = Color(0xFF7DCFFF),
-    onTertiary = Color(0xFF1A1B26),
-    error = Color(0xFFF7768E),
-    onError = Color(0xFF1A1B26),
-    background = Color(0xFF1A1B26),
-    onBackground = Color(0xFFC0CAF5),
-    surface = Color(0xFF1A1B26),
-    onSurface = Color(0xFFC0CAF5),
-    surfaceVariant = Color(0xFF24283B),
-    onSurfaceVariant = Color(0xFFA9B1D6),
-    outline = Color(0xFF565F89)
+import androidx.compose.material3.darkColorScheme
+
+private val DraftBeamColorScheme = darkColorScheme(
+    primary = DraftBeamColors.Primary,
+    onPrimary = DraftBeamColors.TextPrimary,
+    secondary = DraftBeamColors.Violet,
+    onSecondary = DraftBeamColors.TextPrimary,
+    tertiary = DraftBeamColors.LaserCyan,
+    onTertiary = DraftBeamColors.BackgroundDeep,
+    error = DraftBeamColors.Error,
+    onError = DraftBeamColors.BackgroundDeep,
+    background = DraftBeamColors.Background,
+    onBackground = DraftBeamColors.TextPrimary,
+    surface = DraftBeamColors.Surface,
+    onSurface = DraftBeamColors.TextPrimary,
+    surfaceVariant = DraftBeamColors.PanelBackground,
+    onSurfaceVariant = DraftBeamColors.TextSecondary,
+    outline = DraftBeamColors.Border
 )
 
 @Composable
 fun DraftBeamTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = TokyoNightColorScheme,
+        colorScheme = DraftBeamColorScheme,
         typography = Typography,
         content = content
     )
