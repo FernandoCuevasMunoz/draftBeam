@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,6 +45,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextStyle
@@ -53,7 +56,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,8 +65,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
@@ -84,13 +88,14 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -98,6 +103,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamTheme
+import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamColors
 import java.util.UUID
 
 private data class PlanSnapshot(
@@ -657,6 +663,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun DraftBeamScreen(
     status: String,
     devices: List<ScannedMeter>,
@@ -734,26 +741,31 @@ fun DraftBeamScreen(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(20.dp),
-                tonalElevation = 2.dp
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 0.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "draftBeam",
-                            style = MaterialTheme.typography.titleMedium,
+                            text = buildAnnotatedString {
+                                withStyle(SpanStyle(color = DraftBeamColors.TextPrimary)) { append("draft") }
+                                withStyle(
+                                    SpanStyle(
+                                        brush = Brush.linearGradient(
+                                            listOf(DraftBeamColors.PrimaryLight, DraftBeamColors.Purple)
+                                        )
+                                    )
+                                ) { append("Beam") }
+                            },
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontSize = MaterialTheme.typography.titleMedium.fontSize * 1.3f
+                            ),
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         val connectionLabel = when {
-                            selectedDeviceName != null -> selectedDeviceName
+                            selectedDeviceName != null -> "$selectedDeviceName conectado"
                             connectingDeviceName != null -> "Conectando a $connectingDeviceName…"
                             status.contains("falló", ignoreCase = true) ||
                                 status.contains("error", ignoreCase = true) ||
@@ -794,7 +806,8 @@ fun DraftBeamScreen(
                         ) { Icon(Icons.Filled.MoreVert, contentDescription = "Más opciones BLE") }
                         DropdownMenu(
                             expanded = overflowMenuExpanded,
-                            onDismissRequest = { overflowMenuExpanded = false }
+                            onDismissRequest = { overflowMenuExpanded = false },
+                            containerColor = DraftBeamColors.PanelBackground
                         ) {
                             DropdownMenuItem(
                                 text = {
@@ -817,33 +830,6 @@ fun DraftBeamScreen(
                             }
                         }
                     }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Plano (${wallSegments.size} muros)",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium
-                )
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(
-                        text = "Cuadrícula · ${formatScaleCoordinate(gridIntervalMm, gridIntervalMm)}",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-                TextButton(onClick = { showFullscreenPlan = true }) {
-                    Text("Ampliar")
-                }
             }
 
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -862,6 +848,34 @@ fun DraftBeamScreen(
                     },
                     modifier = Modifier.fillMaxSize()
                 )
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 8.dp, top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Plano (${wallSegments.size} muros)",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Cuadrícula · ${formatScaleCoordinate(gridIntervalMm, gridIntervalMm)}",
+                        color = DraftBeamColors.TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1
+                    )
+                    TextButton(
+                        onClick = { showFullscreenPlan = true },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                    ) {
+                        Text("Ampliar", maxLines = 1)
+                    }
+                }
                 Column(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -883,7 +897,7 @@ fun DraftBeamScreen(
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                color = DraftBeamColors.PanelBackground,
                 shape = RoundedCornerShape(20.dp)
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
@@ -943,7 +957,7 @@ fun DraftBeamScreen(
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant,
+                color = DraftBeamColors.PanelBackground,
                 shape = RoundedCornerShape(22.dp)
             ) {
                 Row(
@@ -1078,7 +1092,7 @@ fun DraftBeamScreen(
 
     val editingSegment = selectedWallIndex?.let(wallSegments::getOrNull)
     if (selectedWallIndex != null && editingSegment != null) {
-        WallEditorDialog(
+        WallEditorSheet(
             segment = editingSegment,
             index = selectedWallIndex,
             lengthMeasurementEvent = lengthMeasurementEvent,
@@ -1164,8 +1178,9 @@ private fun formatLastMeasurement(millimeters: Long): String {
     return String.format(java.util.Locale.ROOT, "%.3f m → %d mm", meters, millimeters)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WallEditorDialog(
+private fun WallEditorSheet(
     segment: WallSegment,
     index: Int,
     lengthMeasurementEvent: LengthMeasurement?,
@@ -1179,13 +1194,6 @@ private fun WallEditorDialog(
     var widthText by remember(index, segment.widthMm) { mutableStateOf("") }
     var growthSide by remember(index, segment.growthSide) { mutableStateOf(segment.growthSide) }
     var validationError by remember(index) { mutableStateOf<String?>(null) }
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
-
-    LaunchedEffect(index) {
-        focusRequester.requestFocus()
-        keyboardController?.show()
-    }
 
     LaunchedEffect(lengthMeasurementEvent?.id) {
         lengthMeasurementEvent?.let { event ->
@@ -1194,83 +1202,206 @@ private fun WallEditorDialog(
         }
     }
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("Editar muro ${index + 1}") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Ángulo: ${segment.angleDegrees.formatAngle()}°")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextField(
-                        value = lengthText,
-                        onValueChange = { input ->
-                            lengthText = input.filter(Char::isDigit)
-                            validationError = null
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(focusRequester)
-                            .onFocusChanged { onNewLengthFieldFocusChanged(it.isFocused) },
-                        textStyle = TextStyle(fontSize = 16.sp),
-                        label = { Text("Nuevo largo (mm)", fontSize = 12.sp) },
-                        supportingText = { Text("Actual: ${segment.lengthMm} mm", fontSize = 12.sp) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                    )
-                    TextField(
-                        value = widthText,
-                        onValueChange = { input ->
-                            widthText = input.filter(Char::isDigit)
-                            validationError = null
-                        },
-                        modifier = Modifier.weight(1f),
-                        textStyle = TextStyle(fontSize = 16.sp),
-                        label = { Text("Ancho muro (mm)", fontSize = 12.sp) },
-                        supportingText = { Text("Actual: ${segment.widthMm} mm", fontSize = 12.sp) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                    )
-                }
-                Text("Lado hacia donde crecerá el muro")
+        containerColor = DraftBeamColors.Surface,
+        contentColor = DraftBeamColors.TextPrimary,
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(color = DraftBeamColors.TextMuted)
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 520.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Muro seleccionado", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Muro ${index + 1} · ${segment.lengthMm} mm",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = DraftBeamColors.TextSecondary
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                WallEditorField(
+                    label = "Largo (mm)",
+                    value = lengthText,
+                    placeholder = segment.lengthMm.toString(),
+                    supportingText = "Actual: ${segment.lengthMm} mm",
+                    modifier = Modifier.weight(1f),
+                    onValueChange = { input ->
+                        lengthText = input.filter(Char::isDigit)
+                        validationError = null
+                    },
+                    onFocusChanged = onNewLengthFieldFocusChanged
+                )
+                WallEditorField(
+                    label = "Ancho muro (mm)",
+                    value = widthText,
+                    placeholder = segment.widthMm.toString(),
+                    supportingText = "Actual: ${segment.widthMm} mm",
+                    modifier = Modifier.weight(1f),
+                    onValueChange = { input ->
+                        widthText = input.filter(Char::isDigit)
+                        validationError = null
+                    }
+                )
+                WallEditorField(
+                    label = "Ángulo",
+                    value = "${segment.angleDegrees.formatAngle()}°",
+                    supportingText = wallOrientationLabel(segment.angleDegrees),
+                    modifier = Modifier.weight(0.82f),
+                    readOnly = true
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Dirección del muro", style = MaterialTheme.typography.labelLarge, color = DraftBeamColors.TextSecondary)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     WallGrowthSide.orderedForAngle(segment.angleDegrees).forEach { side ->
-                        FilterChip(
-                            selected = growthSide == side,
+                        val directionLabel = wallGrowthDirectionLabel(side, segment.angleDegrees)
+                        Button(
                             onClick = { growthSide = side },
-                            label = { Text(side.axisLabel(segment.angleDegrees)) }
-                        )
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            border = if (growthSide == side) null else BorderStroke(1.dp, DraftBeamColors.Border),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (growthSide == side) DraftBeamColors.Primary else DraftBeamColors.SurfaceElevated,
+                                contentColor = DraftBeamColors.TextPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                        ) {
+                            Text(directionLabel, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
-                validationError?.let { Text(it) }
+            }
+
+            validationError?.let {
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = onDelete,
+                    modifier = Modifier.weight(1.2f).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
+                        containerColor = DraftBeamColors.Error.copy(alpha = 0.14f),
+                        contentColor = DraftBeamColors.Error
                     ),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Eliminar muro") }
+                    border = BorderStroke(1.dp, DraftBeamColors.Error.copy(alpha = 0.35f)),
+                    contentPadding = PaddingValues(horizontal = 6.dp)
+                ) { Text("Eliminar muro", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, DraftBeamColors.Border),
+                    contentPadding = PaddingValues(horizontal = 6.dp)
+                ) { Text("Cancelar", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                Button(
+                    onClick = {
+                        val length = if (lengthText.isBlank()) segment.lengthMm else lengthText.toLongOrNull()
+                        val width = if (widthText.isBlank()) segment.widthMm else widthText.toLongOrNull()
+                        if (length == null || length <= 0) {
+                            validationError = "Ingresa una longitud mayor que cero."
+                        } else if (width == null || width < 0) {
+                            validationError = "Ingresa un ancho de cero o más milímetros."
+                        } else {
+                            onSaveWall(length, width, growthSide)
+                        }
+                    },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DraftBeamColors.Primary,
+                        contentColor = DraftBeamColors.TextPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 6.dp)
+                ) { Text("Guardar", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
             }
-        },
-        confirmButton = {
-            Button(onClick = {
-                val length = if (lengthText.isBlank()) segment.lengthMm else lengthText.toLongOrNull()
-                val width = if (widthText.isBlank()) segment.widthMm else widthText.toLongOrNull()
-                if (length == null || length <= 0) {
-                    validationError = "Ingresa una longitud mayor que cero."
-                } else if (width == null || width < 0) {
-                    validationError = "Ingresa un ancho de cero o más milímetros."
-                } else {
-                    onSaveWall(length, width, growthSide)
-                }
-            }) { Text("Guardar") }
-        },
-        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancelar") } }
-    )
+        }
+    }
 }
+
+@Composable
+private fun WallEditorField(
+    label: String,
+    value: String,
+    placeholder: String? = null,
+    supportingText: String,
+    modifier: Modifier = Modifier,
+    readOnly: Boolean = false,
+    onValueChange: (String) -> Unit = {},
+    onFocusChanged: (Boolean) -> Unit = {}
+) {
+    Surface(
+        modifier = modifier.heightIn(min = 92.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = DraftBeamColors.SurfaceElevated,
+        border = BorderStroke(1.dp, DraftBeamColors.Border)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = DraftBeamColors.TextSecondary, maxLines = 1)
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.fillMaxWidth().onFocusChanged { onFocusChanged(it.isFocused) },
+                readOnly = readOnly,
+                singleLine = true,
+                textStyle = TextStyle(
+                    color = DraftBeamColors.TextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Medium
+                ),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            ) { innerTextField ->
+                Box {
+                    if (value.isEmpty() && placeholder != null) {
+                        Text(placeholder, color = DraftBeamColors.TextMuted, fontSize = 17.sp)
+                    }
+                    innerTextField()
+                }
+            }
+            Text(
+                supportingText,
+                style = MaterialTheme.typography.labelSmall,
+                color = DraftBeamColors.TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+private fun wallOrientationLabel(angleDegrees: Double): String {
+    val angle = PlanGeometry.normalizeAngle(angleDegrees)
+    return when (angle) {
+        0.0 -> "Horizontal (X+)"
+        90.0 -> "Vertical (Y+)"
+        180.0 -> "Horizontal (X−)"
+        270.0 -> "Vertical (Y−)"
+        else -> "Diagonal"
+    }
+}
+
+private fun wallGrowthDirectionLabel(side: WallGrowthSide, angleDegrees: Double): String =
+    when (side.axisLabel(angleDegrees)) {
+        "Arriba" -> "Arriba (Y+)"
+        "Abajo" -> "Abajo (Y−)"
+        "Izquierda" -> "Izquierda (X−)"
+        "Derecha" -> "Derecha (X+)"
+        else -> side.axisLabel(angleDegrees)
+    }
 
 data class ScannedMeter(val device: BluetoothDevice, val name: String)
 

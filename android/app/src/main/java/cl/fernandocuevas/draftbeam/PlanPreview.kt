@@ -4,13 +4,13 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,6 +31,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamColors
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -59,8 +61,8 @@ fun PlanPreview(
     val draftSegment = remember { mutableStateOf<WallSegment?>(null) }
     val magnifier = remember { mutableStateOf<MagnifierState?>(null) }
     val centerCoordinate = viewport.centerPoint
-    val canvasBackground = Color(0xFF1A1B26)
-    val canvasTextColor = Color(0xFFA9B1D6)
+    val canvasBackground = DraftBeamColors.BackgroundDeep
+    val canvasTextColor = DraftBeamColors.TextSecondary
 
     Box(modifier = modifier) {
       Canvas(
@@ -71,6 +73,7 @@ fun PlanPreview(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val size = this.size
+                    val endpointSnapTolerancePx = ENDPOINT_SNAP_TOLERANCE_DP.dp.toPx()
                     val endpoint = findEndpointAt(
                         segments, down.position, size, viewport, 34.dp.toPx()
                     )
@@ -127,7 +130,9 @@ fun PlanPreview(
                                 mode = GestureMode.DRAW
                                 val worldEnd = viewport.unproject(currentPosition, size)
                                 draftSegment.value = makePreviewSegment(endpoint, worldEnd)
-                                magnifier.value = findNearbyEndpoint(segments, endpoint, worldEnd)
+                                magnifier.value = findNearbyEndpoint(
+                                    segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
+                                )
                                     ?.let { MagnifierState(currentPosition, worldEnd, it) }
                                 change.consume()
                             }
@@ -143,7 +148,9 @@ fun PlanPreview(
                             mode == GestureMode.DRAW -> {
                                 val worldEnd = viewport.unproject(currentPosition, size)
                                 draftSegment.value = makePreviewSegment(endpoint!!, worldEnd)
-                                magnifier.value = findNearbyEndpoint(segments, endpoint, worldEnd)
+                                magnifier.value = findNearbyEndpoint(
+                                    segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
+                                )
                                     ?.let { MagnifierState(currentPosition, worldEnd, it) }
                                 change.consume()
                             }
@@ -168,7 +175,10 @@ fun PlanPreview(
                                     val nearbyEndpoint = findNearbyEndpoint(
                                         segments = segments,
                                         startPoint = endpoint!!,
-                                        endPoint = drawnEnd
+                                        endPoint = drawnEnd,
+                                        canvasSize = size,
+                                        viewport = viewport,
+                                        tolerancePx = endpointSnapTolerancePx
                                     )
                                     if (nearbyEndpoint != null) {
                                         onConnectionRequested(endpoint, drawnEnd, nearbyEndpoint)
@@ -200,8 +210,8 @@ fun PlanPreview(
         // Choose a readable metric interval from the current zoom, aligned to the origin.
         val visibleTopLeft = viewport.unproject(Offset.Zero, size)
         val visibleBottomRight = viewport.unproject(Offset(size.width.toFloat(), size.height.toFloat()), size)
-        val gridColor = Color(0xFF30364F)
-        val majorGridColor = Color(0xFF465071)
+        val gridColor = DraftBeamColors.CadGrid.copy(alpha = 0.42f)
+        val majorGridColor = DraftBeamColors.CadGrid
         val gridStepMm = selectGridStepMm(24.dp.toPx(), viewport.pixelsPerMillimeter)
         val firstGridX = kotlin.math.ceil(min(visibleTopLeft.x, visibleBottomRight.x) / gridStepMm).toLong()
         val lastGridX = kotlin.math.floor(max(visibleTopLeft.x, visibleBottomRight.x) / gridStepMm).toLong()
@@ -283,7 +293,7 @@ fun PlanPreview(
         segments.forEachIndexed { index, segment ->
             val start = viewport.project(segment.start, size)
             val end = viewport.project(segment.end, size)
-            val lineColor = WALL_COLOR
+            val lineColor = if (index == selectedSegmentIndex) DraftBeamColors.LaserCyan else WALL_COLOR
             val strokeWidth = if (index == selectedSegmentIndex) 7.dp.toPx() else 4.dp.toPx()
             val worldFootprints = wallShapes[index]
             if (worldFootprints.isNotEmpty()) {
@@ -309,10 +319,23 @@ fun PlanPreview(
                 // Both long edges of a wall with width are explicitly visible.
                 drawLine(color = lineColor, start = start, end = end, strokeWidth = strokeWidth)
                 PlanGeometry.wallCorners(segment).takeIf { it.size == 4 }?.let { corners ->
+                    // Close both ends of the wall footprint, joining its long edges.
+                    drawLine(
+                        color = lineColor,
+                        start = viewport.project(corners[0], size),
+                        end = viewport.project(corners[3], size),
+                        strokeWidth = strokeWidth
+                    )
                     drawLine(
                         color = lineColor,
                         start = viewport.project(corners[2], size),
                         end = viewport.project(corners[3], size),
+                        strokeWidth = strokeWidth
+                    )
+                    drawLine(
+                        color = lineColor,
+                        start = viewport.project(corners[1], size),
+                        end = viewport.project(corners[2], size),
                         strokeWidth = strokeWidth
                     )
                 }
@@ -323,6 +346,17 @@ fun PlanPreview(
             paint.textSize = dimensionTextSize
             paint.textAlign = Paint.Align.CENTER
             drawSegmentLabel(nativeCanvas, paint, segment, start, end, segment.growthSide, dimensionLabelOffset)
+        }
+
+        selectedSegmentIndex?.let { index ->
+            segments.getOrNull(index)?.let { segment ->
+                listOf(segment.start, segment.end).forEach { endpoint ->
+                    val point = viewport.project(endpoint, size)
+                    drawCircle(DraftBeamColors.BackgroundDeep, 8.dp.toPx(), point)
+                    drawCircle(DraftBeamColors.LaserCyan, 6.dp.toPx(), point)
+                    drawCircle(DraftBeamColors.BackgroundDeep, 2.5.dp.toPx(), point)
+                }
+            }
         }
 
         val connectedPoints = segments
@@ -371,8 +405,8 @@ fun PlanPreview(
         draftSegment.value?.let { draft ->
             val start = viewport.project(draft.start, size)
             val end = viewport.project(draft.end, size)
-            drawLine(DRAFT_WALL_COLOR, start, end, 3.dp.toPx())
-            paint.color = DRAFT_WALL_COLOR.toArgb()
+            drawLine(WALL_ORANGE, start, end, 3.dp.toPx())
+            paint.color = WALL_ORANGE.toArgb()
             paint.textSize = dimensionTextSize
             drawSegmentLabel(nativeCanvas, paint, draft, start, end, draft.growthSide, dimensionLabelOffset)
         }
@@ -433,7 +467,7 @@ fun PlanPreview(
             }
             draftSegment.value?.let { draft ->
                 drawLine(
-                    DRAFT_WALL_COLOR,
+                    WALL_ORANGE,
                     magnify(viewport.project(draft.start, size)),
                     magnify(viewport.project(draft.end, size)),
                     strokeWidth = 3.dp.toPx()
@@ -489,20 +523,32 @@ private fun DirectionEdgeButton(
 ) {
     val difference = abs(PlanGeometry.normalizeAngle(selectedAngleDegrees) - direction.angleDegrees)
     val selected = min(difference, 360.0 - difference) < 0.1
-    Button(
+    OutlinedButton(
         onClick = { onDirectionSelected(direction) },
         modifier = modifier,
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (selected) Color(0xFF7AA2F7) else canvasBackground,
-            contentColor = if (selected) Color(0xFF16161E) else WALL_COLOR
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) DraftBeamColors.PrimaryLight else DraftBeamColors.TechnicalBlue
+        ),
+        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) DraftBeamColors.SurfaceElevated else canvasBackground.copy(alpha = 0.94f),
+            contentColor = if (selected) DraftBeamColors.LaserCyan else DraftBeamColors.TextSecondary
         )
     ) {
-        Text(direction.label)
+        Text(
+            when (direction) {
+                WallDirection.X_NEGATIVE -> "← ${direction.label}"
+                WallDirection.X_POSITIVE -> "${direction.label} →"
+                WallDirection.Y_POSITIVE -> "↑ ${direction.label}"
+                WallDirection.Y_NEGATIVE -> "↓ ${direction.label}"
+            }
+        )
     }
 }
 
-private val WALL_COLOR = Color(0xFF1565C0)
+private val WALL_COLOR = Color(0xFF3478F6)
 private val WALL_ORANGE = Color(0xFFE65100)
 private val DRAFT_WALL_COLOR = Color(0xFF2E7D32)
 
@@ -588,7 +634,7 @@ private fun drawSegmentLabel(
     val dx = end.x - start.x
     val dy = end.y - start.y
     val diagonal = abs(segment.angleDegrees % 90.0) > 0.01
-    val label = if (diagonal) "${segment.lengthMm} mm · ${segment.angleDegrees.formatAngle()}°" else "${segment.lengthMm} mm"
+    val label = if (diagonal) "${segment.lengthMm} · ${segment.angleDegrees.formatAngle()}°" else segment.lengthMm.toString()
     val midX = (start.x + end.x) / 2f
     val midY = (start.y + end.y) / 2f
     val vertical = abs(dx) < 0.01f
@@ -730,19 +776,23 @@ private fun findEndpointAt(
 private fun findNearbyEndpoint(
     segments: List<WallSegment>,
     startPoint: PointMm,
-    endPoint: PointMm
+    endPoint: PointMm,
+    canvasSize: IntSize,
+    viewport: PlanViewportState,
+    tolerancePx: Float
 ): PointMm? {
     val endpoints = (listOf(PointMm(0.0, 0.0)) + segments.flatMap { listOf(it.start, it.end) })
         .distinct()
         .filterNot { it == startPoint }
+    val endOnScreen = viewport.project(endPoint, canvasSize)
     return endpoints
-        .map { point -> point to kotlin.math.hypot(point.x - endPoint.x, point.y - endPoint.y) }
-        .filter { (_, distanceMm) -> distanceMm <= ENDPOINT_SNAP_TOLERANCE_MM }
-        .minByOrNull { (_, distanceMm) -> distanceMm }
+        .map { point -> point to (viewport.project(point, canvasSize) - endOnScreen).getDistance() }
+        .filter { (_, distancePx) -> distancePx <= tolerancePx }
+        .minByOrNull { (_, distancePx) -> distancePx }
         ?.first
 }
 
-private const val ENDPOINT_SNAP_TOLERANCE_MM = 100.0
+private const val ENDPOINT_SNAP_TOLERANCE_DP = 40f
 private const val MILLIMETERS_PER_METER = 1_000.0
 private const val DEFAULT_VIEW_HALF_SPAN_MM = 5_000.0
 
