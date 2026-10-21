@@ -1,8 +1,10 @@
 # draftBeam
 
-**From measurement to CAD.**
+![Portada de draftBeam](docs/screenshots/Portada.png)
 
 draftBeam es una aplicación **Android de código abierto** para capturar medidas de un telémetro láser por Bluetooth Low Energy (BLE), dibujar un plano sencillo de muros y guardarlo como DXF editable. Está en etapa de prototipo: no necesita cuenta ni servidor y aún tiene funciones pendientes de validar en dispositivos reales.
+
+
 
 ## Qué puedes hacer
 
@@ -14,6 +16,8 @@ draftBeam es una aplicación **Android de código abierto** para capturar medida
 
 > **Alcance DXF:** no es un editor CAD general. La importación admite las entidades compatibles implementadas; puede omitir arcos, bloques, splines y otras entidades avanzadas. Guarda una copia del DXF original antes de editarlo.
 
+
+
 ## Requisitos y compatibilidad
 
 | Requisito | Detalle |
@@ -24,6 +28,8 @@ draftBeam es una aplicación **Android de código abierto** para capturar medida
 | Permisos | Bluetooth y, en Android 11 o anterior, ubicación para buscar dispositivos BLE; se solicitan según la versión de Android |
 
 La configuración de compilación usa `targetSdk 37` y `compileSdk 37`. **Android 7.0 es el mínimo configurado, no una certificación de funcionamiento en todas las versiones o equipos**. Se recomienda probar con un teléfono y un medidor reales; un emulador no valida la conexión BLE.
+
+
 
 ## Primeros pasos
 
@@ -41,9 +47,25 @@ La configuración de compilación usa `targetSdk 37` y `compileSdk 37`. **Androi
 
 Si solo quieres explorar el editor, puedes dibujar con el dedo sin conectar un medidor. Las líneas trazadas así tienen longitud aproximada: ajusta el valor numéricamente antes de exportar si necesitas precisión.
 
+
+
 ## Capturas de pantalla
 
-Coloca las capturas **de la aplicación en funcionamiento** en [`docs/screenshots/`](docs/screenshots/README.md). La guía en esa carpeta propone nombres y explica cómo insertarlas aquí. No confundas capturas reales con los mockups de diseño de `android/Design/`; por ahora no se publican capturas de esa carpeta. Oculta direcciones o nombres de dispositivos y cualquier dato personal antes de subir imágenes.
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/Inicio.jpg" width="100%" alt="Pantalla principal de draftBeam"></td>
+    <td width="50%"><img src="docs/screenshots/Conexi%C3%B3n%20BLE.jpg" width="100%" alt="Conexión del telémetro por BLE"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/Plano.jpg" width="100%" alt="Plano editado en draftBeam"></td>
+    <td width="50%"><img src="docs/screenshots/Murallas.jpg" width="100%" alt="Plano con varios muros"></td>
+  </tr>
+  <tr>
+   <td width="50%"><img src="docs/screenshots/Modificaci%C3%B3n%20Muralla.jpg" width="100%" alt="Edición de un muro"></td>
+   <td width="50%"></td>
+  </tr>
+</table>
+
 
 ## Tecnología y estructura
 
@@ -60,6 +82,8 @@ cd android
 ./gradlew testDebugUnitTest assembleDebug lintDebug
 ```
 
+
+
 ## Estado y limitaciones
 
 - El plano se mantiene en memoria mientras la aplicación está abierta. **No existe aún un formato nativo de proyectos**: guarda un DXF para conservar el trabajo entre sesiones.
@@ -68,6 +92,8 @@ cd android
 - Algunos controles visibles son elementos de interfaz deshabilitados hasta que se implementen sus funciones.
 
 Consulta [`CONTEXT.md`](CONTEXT.md) para conocer el alcance y las decisiones técnicas en detalle. No publiques APKs propietarios, identificadores BLE ni registros que contengan datos personales.
+
+
 
 ## Licencia
 
