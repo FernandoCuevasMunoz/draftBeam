@@ -1,0 +1,14 @@
+# Android Studio machine-specific settings and generated output
+/android/.gradle/
+/android/.kotlin/
+/android/.idea/
+/android/local.properties
+/android/**/build/
+/android/captures/
+/android/.externalNativeBuild/
+/android/.cxx/
+
+# Active ADF session log is local working state
+/SESSION.md
+
+.DS_Store

@@ -1,0 +1,303 @@
+package cl.fernandocuevas.draftbeam
+
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.roundToLong
+import kotlin.math.sin
+
+enum class WallDirection(val label: String, val angleDegrees: Double) {
+    X_POSITIVE("X+", 0.0),
+    Y_POSITIVE("Y+", 90.0),
+    X_NEGATIVE("X−", 180.0),
+    Y_NEGATIVE("Y−", 270.0)
+}
+
+data class PointMm(val x: Double, val y: Double)
+
+enum class WallGrowthSide(val label: String) {
+    LEFT("Izquierda"),
+    RIGHT("Derecha");
+
+    companion object {
+        fun orderedForAngle(angleDegrees: Double): List<WallGrowthSide> = entries.sortedBy { side ->
+            when (side.axisLabel(angleDegrees)) {
+                "Arriba", "Izquierda" -> 0
+                "Abajo", "Derecha" -> 1
+                else -> 2
+            }
+        }
+    }
+
+    fun axisLabel(angleDegrees: Double): String {
+        val normalized = PlanGeometry.normalizeAngle(angleDegrees)
+        return when (normalized) {
+            0.0 -> if (this == LEFT) "Arriba" else "Abajo"
+            90.0 -> if (this == LEFT) "Izquierda" else "Derecha"
+            180.0 -> if (this == LEFT) "Abajo" else "Arriba"
+            270.0 -> if (this == LEFT) "Derecha" else "Izquierda"
+            else -> label
+        }
+    }
+}
+
+data class WallSegment(
+    val start: PointMm,
+    val end: PointMm,
+    val lengthMm: Long,
+    val angleDegrees: Double,
+    val widthMm: Long = 0L,
+    val growthSide: WallGrowthSide = WallGrowthSide.LEFT
+)
+
+object PlanGeometry {
+    private val origin = PointMm(0.0, 0.0)
+
+    fun appendSegment(
+        existingSegments: List<WallSegment>,
+        angleDegrees: Double,
+        lengthMm: Long,
+        startPoint: PointMm? = null
+    ): List<WallSegment> {
+        require(lengthMm > 0) { "La longitud del muro debe ser mayor que cero." }
+
+        val start = startPoint ?: existingSegments.lastOrNull()?.end ?: origin
+        val segment = segmentFromLength(start, normalizeAngle(angleDegrees), lengthMm)
+        return existingSegments + segment
+    }
+
+    /** Turns a finger drag into a provisional wall, snapping angles near the four axes. */
+    fun segmentFromDrag(
+        start: PointMm,
+        draggedEnd: PointMm,
+        snapToleranceDegrees: Double = DEFAULT_SNAP_TOLERANCE_DEGREES
+    ): WallSegment {
+        val deltaX = draggedEnd.x - start.x
+        val deltaY = draggedEnd.y - start.y
+        val draggedLength = hypot(deltaX, deltaY)
+        require(draggedLength >= MIN_DRAG_LENGTH_MM) { "Arrastra un poco más para crear el muro." }
+
+        val rawAngle = normalizeAngle(Math.toDegrees(atan2(deltaY, deltaX)))
+        val nearestAxis = WallDirection.entries.minBy { angularDistance(rawAngle, it.angleDegrees) }
+        val angle = if (angularDistance(rawAngle, nearestAxis.angleDegrees) <= snapToleranceDegrees) {
+            nearestAxis.angleDegrees
+        } else {
+            rawAngle
+        }
+
+        return segmentFromLength(start, angle, draggedLength.roundToLong().coerceAtLeast(1))
+    }
+
+    fun updateSegmentLength(
+        existingSegments: List<WallSegment>,
+        index: Int,
+        newLengthMm: Long
+    ): List<WallSegment> {
+        require(index in existingSegments.indices) { "No existe el muro seleccionado." }
+        require(newLengthMm > 0) { "La longitud del muro debe ser mayor que cero." }
+
+        return existingSegments.mapIndexed { segmentIndex, segment ->
+            if (segmentIndex == index) {
+                segmentFromLength(segment.start, segment.angleDegrees, newLengthMm).copy(
+                    widthMm = segment.widthMm,
+                    growthSide = segment.growthSide
+                )
+            } else {
+                segment
+            }
+        }
+    }
+
+    fun updateSegmentWall(
+        existingSegments: List<WallSegment>,
+        index: Int,
+        widthMm: Long,
+        growthSide: WallGrowthSide
+    ): List<WallSegment> {
+        require(index in existingSegments.indices) { "No existe el muro seleccionado." }
+        require(widthMm >= 0) { "El ancho del muro no puede ser negativo." }
+        return existingSegments.mapIndexed { segmentIndex, segment ->
+            if (segmentIndex == index) segment.copy(widthMm = widthMm, growthSide = growthSide) else segment
+        }
+    }
+
+    /** Returns the four corners, with the centerline acting as the chosen wall edge. */
+    fun wallCorners(segment: WallSegment): List<PointMm> {
+        if (segment.widthMm <= 0L) return emptyList()
+        val dx = segment.end.x - segment.start.x
+        val dy = segment.end.y - segment.start.y
+        val length = hypot(dx, dy)
+        require(length > 0.0) { "El muro debe tener longitud para representar su ancho." }
+        val sideSign = if (segment.growthSide == WallGrowthSide.LEFT) 1.0 else -1.0
+        val offsetX = -dy / length * segment.widthMm * sideSign
+        val offsetY = dx / length * segment.widthMm * sideSign
+        return listOf(
+            segment.start,
+            segment.end,
+            PointMm(segment.end.x + offsetX, segment.end.y + offsetY),
+            PointMm(segment.start.x + offsetX, segment.start.y + offsetY)
+        )
+    }
+
+    /**
+     * Calculates visible wall footprints. At a shared endpoint, the wider wall is
+     * trimmed by the narrower wall so their areas do not overlap. Non-connected
+     * crossings are deliberately left untouched.
+     */
+    fun wallFootprints(segments: List<WallSegment>): List<List<List<PointMm>>> =
+        segments.mapIndexed { index, segment ->
+            if (segment.widthMm <= 0L) return@mapIndexed emptyList()
+            var pieces = listOf(wallCorners(segment))
+            segments.forEachIndexed { otherIndex, other ->
+                if (index == otherIndex || other.widthMm <= 0L || !shareEndpoint(segment, other)) {
+                    return@forEachIndexed
+                }
+                val shouldTrimThisWall = segment.widthMm > other.widthMm ||
+                    (segment.widthMm == other.widthMm && index > otherIndex)
+                if (!shouldTrimThisWall) return@forEachIndexed
+
+                val cutter = wallCorners(other)
+                pieces = pieces.flatMap { piece -> subtractConvexPolygon(piece, cutter) }
+            }
+            pieces
+        }
+
+    private fun shareEndpoint(first: WallSegment, second: WallSegment): Boolean =
+        first.start == second.start || first.start == second.end ||
+            first.end == second.start || first.end == second.end
+
+    /** Subtracts a convex clip polygon, returning disjoint convex pieces. */
+    private fun subtractConvexPolygon(
+        subject: List<PointMm>,
+        clip: List<PointMm>
+    ): List<List<PointMm>> {
+        if (subject.size < 3 || clip.size < 3) return listOf(subject)
+        val orientation = if (signedArea(clip) >= 0.0) 1.0 else -1.0
+        var remaining = subject
+        val outsidePieces = mutableListOf<List<PointMm>>()
+        clip.indices.forEach { edgeIndex ->
+            if (remaining.size < 3) return@forEach
+            val edgeStart = clip[edgeIndex]
+            val edgeEnd = clip[(edgeIndex + 1) % clip.size]
+            outsidePieces += clipToHalfPlane(remaining, edgeStart, edgeEnd, orientation, keepInside = false)
+                .takeIf(::hasArea)
+                ?.let(::listOf)
+                .orEmpty()
+            remaining = clipToHalfPlane(remaining, edgeStart, edgeEnd, orientation, keepInside = true)
+        }
+        return outsidePieces
+    }
+
+    private fun clipToHalfPlane(
+        polygon: List<PointMm>,
+        edgeStart: PointMm,
+        edgeEnd: PointMm,
+        orientation: Double,
+        keepInside: Boolean
+    ): List<PointMm> {
+        if (polygon.isEmpty()) return emptyList()
+        fun distance(point: PointMm): Double = orientation *
+            ((edgeEnd.x - edgeStart.x) * (point.y - edgeStart.y) -
+                (edgeEnd.y - edgeStart.y) * (point.x - edgeStart.x))
+
+        val output = mutableListOf<PointMm>()
+        var previous = polygon.last()
+        var previousDistance = distance(previous)
+        var previousKept = if (keepInside) previousDistance >= -GEOMETRY_EPSILON else previousDistance <= GEOMETRY_EPSILON
+        polygon.forEach { current ->
+            val currentDistance = distance(current)
+            val currentKept = if (keepInside) currentDistance >= -GEOMETRY_EPSILON else currentDistance <= GEOMETRY_EPSILON
+            if (currentKept != previousKept) {
+                val denominator = previousDistance - currentDistance
+                if (kotlin.math.abs(denominator) > GEOMETRY_EPSILON) {
+                    val fraction = previousDistance / denominator
+                    output += PointMm(
+                        previous.x + (current.x - previous.x) * fraction,
+                        previous.y + (current.y - previous.y) * fraction
+                    )
+                }
+            }
+            if (currentKept) output += current
+            previous = current
+            previousDistance = currentDistance
+            previousKept = currentKept
+        }
+        return removeDuplicateAdjacentPoints(output)
+    }
+
+    private fun removeDuplicateAdjacentPoints(points: List<PointMm>): List<PointMm> {
+        val result = mutableListOf<PointMm>()
+        points.forEach { point ->
+            if (result.lastOrNull()?.let { distance(it, point) > GEOMETRY_EPSILON } != false) result += point
+        }
+        if (result.size > 1 && distance(result.first(), result.last()) <= GEOMETRY_EPSILON) result.removeAt(result.lastIndex)
+        return result
+    }
+
+    private fun hasArea(polygon: List<PointMm>): Boolean =
+        polygon.size >= 3 && kotlin.math.abs(signedArea(polygon)) > GEOMETRY_EPSILON
+
+    private fun signedArea(polygon: List<PointMm>): Double = polygon.indices.sumOf { index ->
+        val current = polygon[index]
+        val next = polygon[(index + 1) % polygon.size]
+        current.x * next.y - next.x * current.y
+    } / 2.0
+
+    private fun distance(first: PointMm, second: PointMm): Double =
+        hypot(first.x - second.x, first.y - second.y)
+
+    /** Removes only the selected entity; every other segment keeps its original coordinates. */
+    fun removeSegment(existingSegments: List<WallSegment>, index: Int): List<WallSegment> {
+        require(index in existingSegments.indices) { "No existe el muro seleccionado." }
+        return existingSegments.filterIndexed { segmentIndex, _ -> segmentIndex != index }
+    }
+
+    fun normalizeAngle(angleDegrees: Double): Double = ((angleDegrees % 360.0) + 360.0) % 360.0
+
+    /** Normalizes screen-space label rotation so diagonal text is never upside down. */
+    fun uprightLabelRotationDegrees(screenAngleDegrees: Double): Double {
+        var angle = ((screenAngleDegrees + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+        if (angle > 90.0) angle -= 180.0
+        if (angle < -90.0) angle += 180.0
+        return angle
+    }
+
+    /** Picks the side opposite the segment label for a newly created wall. */
+    fun defaultGrowthSide(angleDegrees: Double): WallGrowthSide = when (normalizeAngle(angleDegrees)) {
+        180.0, 270.0 -> WallGrowthSide.LEFT
+        else -> WallGrowthSide.RIGHT
+    }
+
+    private fun segmentFromLength(start: PointMm, angleDegrees: Double, lengthMm: Long): WallSegment {
+        val radians = Math.toRadians(angleDegrees)
+        val deltaX = when (angleDegrees) {
+            0.0 -> lengthMm.toDouble()
+            180.0 -> -lengthMm.toDouble()
+            90.0, 270.0 -> 0.0
+            else -> cos(radians) * lengthMm
+        }
+        val deltaY = when (angleDegrees) {
+            90.0 -> lengthMm.toDouble()
+            270.0 -> -lengthMm.toDouble()
+            0.0, 180.0 -> 0.0
+            else -> sin(radians) * lengthMm
+        }
+
+        return WallSegment(
+            start = start,
+            end = PointMm(start.x + deltaX, start.y + deltaY),
+            lengthMm = lengthMm,
+            angleDegrees = angleDegrees,
+            growthSide = defaultGrowthSide(angleDegrees)
+        )
+    }
+
+    private fun angularDistance(first: Double, second: Double): Double {
+        val difference = kotlin.math.abs(normalizeAngle(first) - normalizeAngle(second))
+        return minOf(difference, 360.0 - difference)
+    }
+
+    private const val MIN_DRAG_LENGTH_MM = 1.0
+    private const val GEOMETRY_EPSILON = 1e-7
+    const val DEFAULT_SNAP_TOLERANCE_DEGREES = 8.0
+}

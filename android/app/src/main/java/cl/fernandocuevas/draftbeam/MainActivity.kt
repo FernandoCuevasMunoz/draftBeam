@@ -1,0 +1,1292 @@
+package cl.fernandocuevas.draftbeam
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanSettings
+import android.net.Uri
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelUuid
+import android.provider.DocumentsContract
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamTheme
+import java.util.UUID
+
+private data class PlanSnapshot(
+    val segments: List<WallSegment>,
+    val selectedStartPoint: PointMm?
+)
+
+private data class PendingConnection(
+    val start: PointMm,
+    val freeEnd: PointMm,
+    val target: PointMm
+)
+
+data class LengthMeasurement(val id: Int, val millimeters: Long)
+
+private class CreateDxfInDownloads : ActivityResultContract<String, Uri?>() {
+    override fun createIntent(context: Context, input: String): Intent =
+        Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/dxf"
+            putExtra(Intent.EXTRA_TITLE, input)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                putExtra(
+                    DocumentsContract.EXTRA_INITIAL_URI,
+                    DocumentsContract.buildDocumentUri(
+                        "com.android.externalstorage.documents",
+                        "primary:Download"
+                    )
+                )
+            }
+        }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
+        if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
+}
+
+class MainActivity : ComponentActivity() {
+    private val status = mutableStateOf("Listo para buscar el medidor.")
+    private val devices = mutableStateListOf<ScannedMeter>()
+    private val notifications = mutableStateListOf<MeasurementNotification>()
+    private val wallSegments = mutableStateListOf<WallSegment>()
+    private val undoHistory = mutableStateListOf<PlanSnapshot>()
+    private val latestMeasurementMm = mutableStateOf<Long?>(null)
+    private val newLengthFieldFocused = mutableStateOf(false)
+    private val lengthMeasurementEvent = mutableStateOf<LengthMeasurement?>(null)
+    private var lengthMeasurementEventId = 0
+    private val selectedAngleDegrees = mutableStateOf(WallDirection.X_POSITIVE.angleDegrees)
+    private val selectedWallIndex = mutableStateOf<Int?>(null)
+    private val selectedStartPoint = mutableStateOf<PointMm?>(null)
+    private val selectedDeviceName = mutableStateOf<String?>(null)
+    private val connectingDeviceName = mutableStateOf<String?>(null)
+    private val dxfImportRevision = mutableIntStateOf(0)
+
+    private val bluetoothAdapter by lazy {
+        (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var scanner: BluetoothLeScanner? = null
+    private var connectedGatt: BluetoothGatt? = null
+
+    private val stopScanRunnable = Runnable { stopScan("Búsqueda finalizada.") }
+
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult) {
+            val device = result.device
+            val label = try {
+                device.name?.takeIf { it.isNotBlank() } ?: "Medidor BLE"
+            } catch (_: SecurityException) {
+                "Medidor BLE"
+            }
+
+            runOnUiThread {
+                if (devices.none { it.device.address == device.address }) {
+                    devices.add(ScannedMeter(device, label))
+                }
+                status.value = "Medidor encontrado. Toca su nombre para conectar."
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            runOnUiThread { status.value = "Falló el escaneo BLE (código $errorCode)." }
+        }
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt, statusCode: Int, newState: Int) {
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread {
+                    status.value = "Error de conexión GATT: $statusCode."
+                    selectedDeviceName.value = null
+                    connectingDeviceName.value = null
+                }
+                gatt.close()
+                if (connectedGatt === gatt) connectedGatt = null
+                return
+            }
+
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    runOnUiThread { status.value = "Conectado a ${connectingDeviceName.value ?: "medidor"}. Buscando características BLE…" }
+                    gatt.discoverServices()
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    gatt.close()
+                    if (connectedGatt === gatt) connectedGatt = null
+                    runOnUiThread {
+                        selectedDeviceName.value = null
+                        connectingDeviceName.value = null
+                        status.value = "Desconectado del medidor."
+                    }
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, statusCode: Int) {
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
+                runOnUiThread {
+                    selectedDeviceName.value = null
+                    connectingDeviceName.value = null
+                    status.value = "No se pudieron descubrir los servicios BLE."
+                }
+                return
+            }
+
+            val characteristic = gatt
+                .getService(METER_SERVICE_UUID)
+                ?.getCharacteristic(MEASUREMENT_CHARACTERISTIC_UUID)
+
+            if (characteristic == null) {
+                runOnUiThread {
+                    selectedDeviceName.value = null
+                    connectingDeviceName.value = null
+                    status.value = "No se encontró la característica de medición FFB2."
+                }
+                return
+            }
+
+            val notificationEnabled = gatt.setCharacteristicNotification(characteristic, true)
+            val descriptor = characteristic.getDescriptor(CCCD_UUID)
+            if (!notificationEnabled || descriptor == null) {
+                runOnUiThread {
+                    selectedDeviceName.value = null
+                    connectingDeviceName.value = null
+                    status.value = "No se pudo preparar la suscripción a FFB2."
+                }
+                return
+            }
+
+            val value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            val writeStarted = if (Build.VERSION.SDK_INT >= 33) {
+                gatt.writeDescriptor(descriptor, value) == BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                descriptor.value = value
+                @Suppress("DEPRECATION")
+                gatt.writeDescriptor(descriptor)
+            }
+
+            if (!writeStarted) {
+                runOnUiThread {
+                    selectedDeviceName.value = null
+                    connectingDeviceName.value = null
+                    status.value = "No se pudo activar la notificación de FFB2."
+                }
+            }
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            statusCode: Int
+        ) {
+            if (descriptor.uuid == CCCD_UUID) {
+                runOnUiThread {
+                    status.value = if (statusCode == BluetoothGatt.GATT_SUCCESS) {
+                        selectedDeviceName.value = connectingDeviceName.value ?: "Medidor BLE"
+                        connectingDeviceName.value = null
+                        "Suscrito a FFB2. Pulsa el botón de medición del telémetro."
+                    } else {
+                        selectedDeviceName.value = null
+                        connectingDeviceName.value = null
+                        "Falló la suscripción a FFB2 (código $statusCode)."
+                    }
+                }
+            }
+        }
+
+        @Deprecated("Usado en Android anterior a 13")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            @Suppress("DEPRECATION")
+            val value = characteristic.value?.copyOf() ?: return
+            onMeasurementNotification(characteristic, value)
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            onMeasurementNotification(characteristic, value.copyOf())
+        }
+    }
+
+    private fun onMeasurementNotification(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ) {
+        if (characteristic.uuid != MEASUREMENT_CHARACTERISTIC_UUID) return
+        val hex = value.joinToString(" ") { byte -> "%02X".format(byte.toInt() and 0xFF) }
+        val decoded = MeasurementParser.parse(value)
+        runOnUiThread {
+            latestMeasurementMm.value = (decoded as? MeasurementParseResult.Success)?.millimeters
+            notifications.add(
+                0,
+                when (decoded) {
+                    is MeasurementParseResult.Success -> MeasurementNotification(
+                        rawHex = hex,
+                        millimeters = decoded.millimeters
+                    )
+                    is MeasurementParseResult.Invalid -> MeasurementNotification(
+                        rawHex = hex,
+                        parseError = decoded.reason
+                    )
+                }
+            )
+            while (notifications.size > 30) notifications.removeAt(notifications.lastIndex)
+            status.value = when (decoded) {
+                is MeasurementParseResult.Success -> {
+                    if (newLengthFieldFocused.value) {
+                        lengthMeasurementEvent.value = LengthMeasurement(++lengthMeasurementEventId, decoded.millimeters)
+                        "Medida recibida para Nuevo largo: ${decoded.millimeters} mm."
+                    } else {
+                        addWallForMeasurement(decoded.millimeters)
+                    }
+                }
+                is MeasurementParseResult.Invalid -> "Notificación recibida, pero no se pudo interpretar."
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+
+        setContent {
+            DraftBeamTheme {
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { permissions ->
+                    if (permissions.values.all { it }) startScan()
+                    else status.value = "Se necesitan permisos Bluetooth para buscar el medidor."
+                }
+                val saveDxfLauncher = rememberLauncherForActivityResult(CreateDxfInDownloads()) { uri ->
+                    uri?.let(::saveDxf)
+                }
+                val loadDxfLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri -> uri?.let(::loadDxf) }
+
+                DraftBeamScreen(
+                    status = status.value,
+                    devices = devices.toList(),
+                    notifications = notifications.toList(),
+                    wallSegments = wallSegments.toList(),
+                    canUndo = undoHistory.isNotEmpty(),
+                    latestMeasurementMm = latestMeasurementMm.value,
+                    selectedAngleDegrees = selectedAngleDegrees.value,
+                    selectedWallIndex = selectedWallIndex.value,
+                    lengthMeasurementEvent = lengthMeasurementEvent.value,
+                    selectedStartPoint = selectedStartPoint.value,
+                    selectedDeviceName = selectedDeviceName.value,
+                    connectingDeviceName = connectingDeviceName.value,
+                    dxfImportRevision = dxfImportRevision.value,
+                    onSaveDxfClick = { saveDxfLauncher.launch("draftBeam.dxf") },
+                    onLoadDxfClick = {
+                        loadDxfLauncher.launch(
+                            arrayOf("application/dxf", "application/x-dxf", "image/vnd.dxf", "application/octet-stream", "*/*")
+                        )
+                    },
+                    onScanClick = {
+                        val missingPermissions = requiredPermissions()
+                            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                        if (missingPermissions.isEmpty()) startScan()
+                        else permissionLauncher.launch(missingPermissions.toTypedArray())
+                    },
+                    onDeviceClick = ::connectToDevice,
+                    onDisconnectClick = ::disconnect,
+                    onDirectionSelected = { selectedAngleDegrees.value = it.angleDegrees },
+                    onDeleteWallClick = ::deleteSelectedWall,
+                    onUndoClick = ::undoLastPlanAction,
+                    onWallSelected = { selectedWallIndex.value = it },
+                    onSaveWallProperties = { index, length, width, side ->
+                        updateWallProperties(index, length, width, side).also { status.value = it }
+                    },
+                    onNewLengthFieldFocusChanged = { newLengthFieldFocused.value = it },
+                    onLengthMeasurementConsumed = { eventId ->
+                        if (lengthMeasurementEvent.value?.id == eventId) lengthMeasurementEvent.value = null
+                    },
+                    onDismissWallEditor = {
+                        newLengthFieldFocused.value = false
+                        selectedWallIndex.value = null
+                    },
+                    onFingerDrawn = ::addWallFromFinger,
+                    onStartPointSelected = { point ->
+                        selectedStartPoint.value = point
+                        selectedWallIndex.value = null
+                        status.value = "Punto de continuación seleccionado: ${point.formatCoordinates()} mm."
+                    }
+                )
+            }
+        }
+    }
+
+    private fun requiredPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= 31) {
+        arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+    @Suppress("MissingPermission")
+    private fun startScan() {
+        if (!hasBluetoothPermissions()) {
+            status.value = "Faltan permisos Bluetooth. Toca Buscar medidor para concederlos."
+            return
+        }
+        if (!bluetoothAdapter.isEnabled) {
+            status.value = "Activa Bluetooth en el teléfono y vuelve a buscar."
+            return
+        }
+
+        val bleScanner = bluetoothAdapter.bluetoothLeScanner
+        if (bleScanner == null) {
+            status.value = "El escáner BLE no está disponible en este teléfono."
+            return
+        }
+
+        devices.clear()
+        scanner = bleScanner
+        status.value = "Buscando medidores BLE durante 12 segundos…"
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(METER_SERVICE_UUID))
+            .build()
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        try {
+            bleScanner.startScan(listOf(filter), settings, scanCallback)
+            mainHandler.removeCallbacks(stopScanRunnable)
+            mainHandler.postDelayed(stopScanRunnable, SCAN_DURATION_MS)
+        } catch (exception: SecurityException) {
+            status.value = "Android no autorizó el escaneo BLE: ${exception.message}"
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun stopScan(message: String) {
+        try {
+            scanner?.stopScan(scanCallback)
+        } catch (_: SecurityException) {
+            // El permiso pudo revocarse mientras el escaneo estaba activo.
+        }
+        scanner = null
+        if (devices.isEmpty() && status.value.startsWith("Buscando")) {
+            status.value = "$message No se encontraron dispositivos con el servicio FFB0."
+        } else if (status.value.startsWith("Buscando")) {
+            status.value = message
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun connectToDevice(meter: ScannedMeter) {
+        if (!hasBluetoothPermissions()) {
+            status.value = "Faltan permisos Bluetooth para conectar."
+            return
+        }
+        stopScan("Conectando al medidor…")
+        connectedGatt?.close()
+        notifications.clear()
+        selectedDeviceName.value = null
+        connectingDeviceName.value = meter.name
+        status.value = "Conectando a ${meter.name}…"
+        connectedGatt = meter.device.connectGatt(this, false, gattCallback)
+    }
+
+    @Suppress("MissingPermission")
+    private fun disconnect() {
+        connectedGatt?.disconnect()
+        status.value = "Desconectando…"
+    }
+
+    private fun addWallForMeasurement(measurement: Long): String {
+        try {
+            val updatedSegments = PlanGeometry.appendSegment(
+                existingSegments = wallSegments.toList(),
+                angleDegrees = selectedAngleDegrees.value,
+                lengthMm = measurement,
+                startPoint = selectedStartPoint.value
+            )
+            pushPlanSnapshot()
+            wallSegments.add(updatedSegments.last())
+            val endpoint = updatedSegments.last().end
+            selectedStartPoint.value = endpoint
+            selectedWallIndex.value = null
+            return "Muro agregado automáticamente: $measurement mm a ${selectedAngleDegrees.value.formatAngle()}°. Extremo ${endpoint.formatCoordinates()} mm."
+        } catch (exception: IllegalArgumentException) {
+            return exception.message ?: "La medida no es válida para crear un muro."
+        } catch (_: ArithmeticException) {
+            return "El plano excede el rango de coordenadas permitido."
+        }
+    }
+
+    private fun addWallFromFinger(start: PointMm, draggedEnd: PointMm) {
+        try {
+            val segment = PlanGeometry.segmentFromDrag(start, draggedEnd)
+            pushPlanSnapshot()
+            wallSegments.add(segment)
+            selectedStartPoint.value = segment.end
+            selectedAngleDegrees.value = segment.angleDegrees
+            selectedWallIndex.value = null
+            status.value = "Muro dibujado: ${segment.lengthMm} mm a ${segment.angleDegrees.formatAngle()}°."
+        } catch (exception: IllegalArgumentException) {
+            status.value = exception.message ?: "No se pudo crear el muro."
+        }
+    }
+
+    private fun updateWallProperties(
+        index: Int,
+        lengthMm: Long,
+        widthMm: Long,
+        side: WallGrowthSide
+    ): String {
+        return try {
+            val before = wallSegments.toList()
+            val previousEnd = before.getOrNull(index)?.end
+            val withNewLength = PlanGeometry.updateSegmentLength(before, index, lengthMm)
+            val updatedSegments = PlanGeometry.updateSegmentWall(withNewLength, index, widthMm, side)
+            if (updatedSegments != before) pushPlanSnapshot()
+            wallSegments.clear()
+            wallSegments.addAll(updatedSegments)
+            if (previousEnd != null && selectedStartPoint.value == previousEnd) {
+                selectedStartPoint.value = updatedSegments[index].end
+            }
+            "Muro actualizado: ${lengthMm} mm de largo y ${widthMm} mm de ancho."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo actualizar el muro."
+        }
+    }
+
+    private fun saveDxf(uri: Uri) {
+        try {
+            val output = contentResolver.openOutputStream(uri)
+                ?: throw IllegalStateException("Android no pudo abrir el archivo para escritura.")
+            output.bufferedWriter(Charsets.UTF_8).use { writer ->
+                writer.write(DxfCodec.encode(wallSegments.toList()))
+            }
+            status.value = "Plano guardado como DXF en la ubicación elegida."
+        } catch (exception: Exception) {
+            status.value = "No se pudo guardar el DXF: ${exception.message ?: "error de archivo"}"
+        }
+    }
+
+    private fun loadDxf(uri: Uri) {
+        try {
+            val input = contentResolver.openInputStream(uri)
+                ?: throw IllegalStateException("Android no pudo abrir el archivo seleccionado.")
+            val contents = input.bufferedReader(Charsets.UTF_8).use { reader ->
+                val text = StringBuilder()
+                val buffer = CharArray(8_192)
+                while (true) {
+                    val count = reader.read(buffer)
+                    if (count < 0) break
+                    require(text.length + count <= MAX_DXF_IMPORT_CHARS) {
+                        "El DXF supera el límite de 16 MB."
+                    }
+                    text.append(buffer, 0, count)
+                }
+                text.toString()
+            }
+            val imported = DxfCodec.decode(contents)
+            val before = wallSegments.toList()
+            if (before != imported.segments) pushPlanSnapshot()
+            wallSegments.clear()
+            wallSegments.addAll(imported.segments)
+            selectedWallIndex.value = null
+            selectedStartPoint.value = imported.segments.lastOrNull()?.end
+            dxfImportRevision.value++
+            status.value = buildString {
+                append("DXF cargado: ${imported.segments.size} entidades editables.")
+                imported.warnings.forEach { append(" ").append(it) }
+            }
+        } catch (exception: Exception) {
+            status.value = "No se pudo cargar el DXF: ${exception.message ?: "archivo no válido"}"
+        }
+    }
+
+    private fun deleteSelectedWall() {
+        val index = selectedWallIndex.value ?: return
+        try {
+            val updatedSegments = PlanGeometry.removeSegment(wallSegments.toList(), index)
+            pushPlanSnapshot()
+            wallSegments.clear()
+            wallSegments.addAll(updatedSegments)
+            selectedWallIndex.value = null
+            if (selectedStartPoint.value != null &&
+                selectedStartPoint.value != PointMm(0.0, 0.0) &&
+                updatedSegments.none { it.start == selectedStartPoint.value || it.end == selectedStartPoint.value }
+            ) {
+                selectedStartPoint.value = updatedSegments.lastOrNull()?.end
+            }
+            status.value = "Muro eliminado. Las demás líneas conservaron su posición."
+        } catch (exception: IllegalArgumentException) {
+            selectedWallIndex.value = null
+            status.value = exception.message ?: "No se pudo eliminar el muro seleccionado."
+        }
+    }
+
+    private fun pushPlanSnapshot() {
+        undoHistory.add(
+            PlanSnapshot(
+                segments = wallSegments.toList(),
+                selectedStartPoint = selectedStartPoint.value
+            )
+        )
+    }
+
+    private fun undoLastPlanAction() {
+        val previous = undoHistory.removeLastOrNull() ?: return
+        wallSegments.clear()
+        wallSegments.addAll(previous.segments)
+        selectedStartPoint.value = previous.selectedStartPoint
+        selectedWallIndex.value = null
+        status.value = "Última acción del plano deshecha."
+    }
+
+    private fun hasBluetoothPermissions(): Boolean = requiredPermissions().all {
+        checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    override fun onDestroy() {
+        mainHandler.removeCallbacks(stopScanRunnable)
+        try {
+            scanner?.stopScan(scanCallback)
+            connectedGatt?.close()
+        } catch (_: SecurityException) {
+            // La actividad se está cerrando; no mantener recursos BLE abiertos.
+        }
+        scanner = null
+        connectedGatt = null
+        super.onDestroy()
+    }
+}
+
+@Composable
+fun DraftBeamScreen(
+    status: String,
+    devices: List<ScannedMeter>,
+    notifications: List<MeasurementNotification>,
+    wallSegments: List<WallSegment>,
+    canUndo: Boolean,
+    latestMeasurementMm: Long?,
+    selectedAngleDegrees: Double,
+    selectedWallIndex: Int?,
+    lengthMeasurementEvent: LengthMeasurement?,
+    selectedStartPoint: PointMm?,
+    selectedDeviceName: String?,
+    connectingDeviceName: String?,
+    dxfImportRevision: Int,
+    onSaveDxfClick: () -> Unit,
+    onLoadDxfClick: () -> Unit,
+    onScanClick: () -> Unit,
+    onDeviceClick: (ScannedMeter) -> Unit,
+    onDisconnectClick: () -> Unit,
+    onDirectionSelected: (WallDirection) -> Unit,
+    onDeleteWallClick: () -> Unit,
+    onUndoClick: () -> Unit,
+    onWallSelected: (Int?) -> Unit,
+    onStartPointSelected: (PointMm) -> Unit,
+    onSaveWallProperties: (Int, Long, Long, WallGrowthSide) -> String,
+    onNewLengthFieldFocusChanged: (Boolean) -> Unit,
+    onLengthMeasurementConsumed: (Int) -> Unit,
+    onDismissWallEditor: () -> Unit,
+    onFingerDrawn: (PointMm, PointMm) -> Unit
+) {
+    val viewport = remember { PlanViewportState() }
+    var showMeasurements by remember { mutableStateOf(false) }
+    var showFullscreenPlan by remember { mutableStateOf(false) }
+    var showReplaceDxfConfirmation by remember { mutableStateOf(false) }
+    var showBleDialog by remember { mutableStateOf(false) }
+    var overflowMenuExpanded by remember { mutableStateOf(false) }
+    var pendingConnection by remember { mutableStateOf<PendingConnection?>(null) }
+    val density = LocalDensity.current
+    val gridIntervalMm = with(density) {
+        selectGridStepMm(24.dp.toPx(), viewport.pixelsPerMillimeter)
+    }
+    var previousSegmentCount by remember { mutableIntStateOf(wallSegments.size) }
+    var previousWallProfiles by remember {
+        mutableStateOf(wallSegments.map { it.widthMm to it.growthSide })
+    }
+    LaunchedEffect(wallSegments.size) {
+        if (wallSegments.size > previousSegmentCount) {
+            viewport.fitToContent(wallSegments)
+        }
+        previousSegmentCount = wallSegments.size
+    }
+    LaunchedEffect(dxfImportRevision) {
+        if (dxfImportRevision > 0) viewport.fitToContent(wallSegments)
+    }
+    val wallProfiles = wallSegments.map { it.widthMm to it.growthSide }
+    LaunchedEffect(wallProfiles) {
+        if (wallProfiles != previousWallProfiles) viewport.fitToContent(wallSegments)
+        previousWallProfiles = wallProfiles
+    }
+
+    val requestLoadDxf = {
+        if (wallSegments.isEmpty()) onLoadDxfClick() else showReplaceDxfConfirmation = true
+    }
+    val openBlePicker = {
+        overflowMenuExpanded = false
+        showBleDialog = true
+        onScanClick()
+    }
+
+    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(20.dp),
+                tonalElevation = 2.dp
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "draftBeam",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val connectionLabel = when {
+                            selectedDeviceName != null -> selectedDeviceName
+                            connectingDeviceName != null -> "Conectando a $connectingDeviceName…"
+                            status.contains("falló", ignoreCase = true) ||
+                                status.contains("error", ignoreCase = true) ||
+                                status.contains("permiso", ignoreCase = true) -> status
+                            else -> "Conectar BLE"
+                        }
+                        TextButton(
+                            onClick = { if (selectedDeviceName == null && connectingDeviceName == null) openBlePicker() },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                            enabled = selectedDeviceName == null && connectingDeviceName == null
+                        ) {
+                            val stateColor = when {
+                                selectedDeviceName != null -> Color(0xFF28D995)
+                                connectingDeviceName != null -> Color(0xFFE0AF68)
+                                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                            Text("●", color = stateColor, fontSize = 13.sp)
+                            Text(
+                                text = "  $connectionLabel",
+                                color = stateColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+
+                    IconButton(onClick = requestLoadDxf, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Filled.FolderOpen, contentDescription = "Abrir DXF")
+                    }
+                    IconButton(onClick = onSaveDxfClick, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Filled.Save, contentDescription = "Guardar DXF")
+                    }
+                    Box {
+                        IconButton(
+                            onClick = { overflowMenuExpanded = true },
+                            modifier = Modifier.size(44.dp)
+                        ) { Icon(Icons.Filled.MoreVert, contentDescription = "Más opciones BLE") }
+                        DropdownMenu(
+                            expanded = overflowMenuExpanded,
+                            onDismissRequest = { overflowMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (selectedDeviceName == null && connectingDeviceName == null) "Conectar BLE"
+                                        else "Cambiar medidor"
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Bluetooth, contentDescription = null) },
+                                onClick = { openBlePicker() }
+                            )
+                            if (selectedDeviceName != null || connectingDeviceName != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Desconectar") },
+                                    onClick = {
+                                        overflowMenuExpanded = false
+                                        onDisconnectClick()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Plano (${wallSegments.size} muros)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Medium
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = "Cuadrícula · ${formatScaleCoordinate(gridIntervalMm, gridIntervalMm)}",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                TextButton(onClick = { showFullscreenPlan = true }) {
+                    Text("Ampliar")
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                PlanPreview(
+                    segments = wallSegments,
+                    selectedSegmentIndex = selectedWallIndex,
+                    selectedStartPoint = selectedStartPoint,
+                    selectedAngleDegrees = selectedAngleDegrees,
+                    viewport = viewport,
+                    onDirectionSelected = onDirectionSelected,
+                    onSegmentSelected = onWallSelected,
+                    onStartPointSelected = onStartPointSelected,
+                    onFingerDrawn = onFingerDrawn,
+                    onConnectionRequested = { start, freeEnd, target ->
+                        pendingConnection = PendingConnection(start, freeEnd, target)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+                Column(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OverlayIconButton(
+                        icon = Icons.Filled.CenterFocusStrong,
+                        label = "Ajustar plano",
+                        enabled = true,
+                        onClick = { viewport.fitToContent(wallSegments) }
+                    )
+                    OverlayIconButton(
+                        icon = Icons.Filled.Layers,
+                        label = "Capas (próximamente)",
+                        enabled = false,
+                        onClick = {}
+                    )
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(20.dp)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Bluetooth,
+                            contentDescription = "Última medición Bluetooth",
+                            tint = Color(0xFF7DCFFF),
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = latestMeasurementMm?.let { formatLastMeasurement(it) } ?: "Sin mediciones",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = status.takeIf { latestMeasurementMm != null }
+                                    ?: "Pulsa el medidor para capturar una distancia",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        TextButton(onClick = { showMeasurements = !showMeasurements }) {
+                            Text(if (showMeasurements) "Ocultar (${notifications.size})" else "Mediciones (${notifications.size})")
+                        }
+                    }
+                    if (showMeasurements) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 116.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (notifications.isEmpty()) {
+                                Text("Aún no se reciben notificaciones.", style = MaterialTheme.typography.bodySmall)
+                            } else {
+                                notifications.forEach { measurement ->
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        measurement.millimeters?.let { Text("Medida: $it mm") }
+                                        measurement.parseError?.let { Text("No interpretada: $it", color = MaterialTheme.colorScheme.error) }
+                                        Text("Bytes: ${measurement.rawHex}", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(22.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndoClick)
+                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null, { if (selectedWallIndex == null) Unit })
+                    BottomAction(Icons.Filled.OpenWith, "Dirección", enabled = false, onClick = {})
+                    BottomAction(Icons.Filled.FolderOpen, "Abrir", enabled = false, onClick = {})
+                    BottomAction(Icons.Filled.Save, "Guardar", enabled = false, onClick = {})
+                }
+            }
+        }
+    }
+
+    if (showBleDialog) {
+        AlertDialog(
+            onDismissRequest = { showBleDialog = false },
+            title = { Text("Conectar medidor BLE") },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (devices.isEmpty()) {
+                        Text(
+                            if (status.startsWith("Buscando", ignoreCase = true)) {
+                                "Buscando medidores cercanos…"
+                            } else {
+                                "No se encontraron dispositivos. Comprueba que el medidor esté encendido y vuelve a buscar."
+                            },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        devices.forEach { meter ->
+                            OutlinedButton(
+                                onClick = {
+                                    showBleDialog = false
+                                    onDeviceClick(meter)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.Bluetooth, contentDescription = null)
+                                Text(meter.name, modifier = Modifier.padding(start = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { onScanClick() }) { Text("Buscar de nuevo") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBleDialog = false }) { Text("Cerrar") }
+            }
+        )
+    }
+
+    if (showReplaceDxfConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showReplaceDxfConfirmation = false },
+            title = { Text("Cargar otro plano") },
+            text = { Text("El DXF reemplazará el plano actual. Podrás deshacer esta carga después.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showReplaceDxfConfirmation = false
+                    onLoadDxfClick()
+                }) { Text("Continuar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReplaceDxfConfirmation = false }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    if (showFullscreenPlan) {
+        Dialog(
+            onDismissRequest = { showFullscreenPlan = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = MaterialTheme.colorScheme.background
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Plano (${wallSegments.size} muros)")
+                        TextButton(onClick = { showFullscreenPlan = false }) { Text("Volver") }
+                    }
+                    PlanPreview(
+                        segments = wallSegments,
+                        selectedSegmentIndex = selectedWallIndex,
+                        selectedStartPoint = selectedStartPoint,
+                        selectedAngleDegrees = selectedAngleDegrees,
+                        viewport = viewport,
+                        onDirectionSelected = onDirectionSelected,
+                        onSegmentSelected = onWallSelected,
+                        onStartPointSelected = onStartPointSelected,
+                        onFingerDrawn = onFingerDrawn,
+                        onConnectionRequested = { start, freeEnd, target ->
+                            pendingConnection = PendingConnection(start, freeEnd, target)
+                        },
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { viewport.fitToContent(wallSegments) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Ajustar plano") }
+                        Button(
+                            onClick = onUndoClick,
+                            enabled = canUndo,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Deshacer") }
+                    }
+                }
+            }
+        }
+    }
+
+    val editingSegment = selectedWallIndex?.let(wallSegments::getOrNull)
+    if (selectedWallIndex != null && editingSegment != null) {
+        WallEditorDialog(
+            segment = editingSegment,
+            index = selectedWallIndex,
+            lengthMeasurementEvent = lengthMeasurementEvent,
+            onNewLengthFieldFocusChanged = onNewLengthFieldFocusChanged,
+            onLengthMeasurementConsumed = onLengthMeasurementConsumed,
+            onDismiss = onDismissWallEditor,
+            onSaveWall = { lengthMm, widthMm, side ->
+                onSaveWallProperties(selectedWallIndex, lengthMm, widthMm, side)
+                onDismissWallEditor()
+            },
+            onDelete = onDeleteWallClick
+        )
+    }
+
+    pendingConnection?.let { connection ->
+        AlertDialog(
+            onDismissRequest = {
+                onFingerDrawn(connection.start, connection.freeEnd)
+                pendingConnection = null
+            },
+            title = { Text("Conectar extremos") },
+            text = { Text("El extremo está cerca de un punto existente. ¿Quieres conectar la línea con ese punto?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onFingerDrawn(connection.start, connection.target)
+                    pendingConnection = null
+                }) { Text("Sí") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    onFingerDrawn(connection.start, connection.freeEnd)
+                    pendingConnection = null
+                }) { Text("No") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun OverlayIconButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.96f else 0.65f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(52.dp)) {
+            Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun BottomAction(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier.width(64.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp)
+    ) {
+        IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(48.dp)) {
+            Icon(icon, contentDescription = label, modifier = Modifier.size(23.dp))
+        }
+        Text(
+            text = label,
+            color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Clip
+        )
+    }
+}
+
+private fun formatLastMeasurement(millimeters: Long): String {
+    val meters = millimeters / 1_000.0
+    return String.format(java.util.Locale.ROOT, "%.3f m → %d mm", meters, millimeters)
+}
+
+@Composable
+private fun WallEditorDialog(
+    segment: WallSegment,
+    index: Int,
+    lengthMeasurementEvent: LengthMeasurement?,
+    onNewLengthFieldFocusChanged: (Boolean) -> Unit,
+    onLengthMeasurementConsumed: (Int) -> Unit,
+    onDismiss: () -> Unit,
+    onSaveWall: (Long, Long, WallGrowthSide) -> Unit,
+    onDelete: () -> Unit
+) {
+    var lengthText by remember(index, segment.lengthMm) { mutableStateOf("") }
+    var widthText by remember(index, segment.widthMm) { mutableStateOf("") }
+    var growthSide by remember(index, segment.growthSide) { mutableStateOf(segment.growthSide) }
+    var validationError by remember(index) { mutableStateOf<String?>(null) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(index) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    LaunchedEffect(lengthMeasurementEvent?.id) {
+        lengthMeasurementEvent?.let { event ->
+            onLengthMeasurementConsumed(event.id)
+            onSaveWall(event.millimeters, segment.widthMm, segment.growthSide)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Editar muro ${index + 1}") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Ángulo: ${segment.angleDegrees.formatAngle()}°")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextField(
+                        value = lengthText,
+                        onValueChange = { input ->
+                            lengthText = input.filter(Char::isDigit)
+                            validationError = null
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester)
+                            .onFocusChanged { onNewLengthFieldFocusChanged(it.isFocused) },
+                        textStyle = TextStyle(fontSize = 16.sp),
+                        label = { Text("Nuevo largo (mm)", fontSize = 12.sp) },
+                        supportingText = { Text("Actual: ${segment.lengthMm} mm", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    TextField(
+                        value = widthText,
+                        onValueChange = { input ->
+                            widthText = input.filter(Char::isDigit)
+                            validationError = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        textStyle = TextStyle(fontSize = 16.sp),
+                        label = { Text("Ancho muro (mm)", fontSize = 12.sp) },
+                        supportingText = { Text("Actual: ${segment.widthMm} mm", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
+                Text("Lado hacia donde crecerá el muro")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WallGrowthSide.orderedForAngle(segment.angleDegrees).forEach { side ->
+                        FilterChip(
+                            selected = growthSide == side,
+                            onClick = { growthSide = side },
+                            label = { Text(side.axisLabel(segment.angleDegrees)) }
+                        )
+                    }
+                }
+                validationError?.let { Text(it) }
+                Button(
+                    onClick = onDelete,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Eliminar muro") }
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                val length = if (lengthText.isBlank()) segment.lengthMm else lengthText.toLongOrNull()
+                val width = if (widthText.isBlank()) segment.widthMm else widthText.toLongOrNull()
+                if (length == null || length <= 0) {
+                    validationError = "Ingresa una longitud mayor que cero."
+                } else if (width == null || width < 0) {
+                    validationError = "Ingresa un ancho de cero o más milímetros."
+                } else {
+                    onSaveWall(length, width, growthSide)
+                }
+            }) { Text("Guardar") }
+        },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+data class ScannedMeter(val device: BluetoothDevice, val name: String)
+
+fun Double.formatAngle(): String = String.format(java.util.Locale.ROOT, "%.1f", this)
+
+private fun PointMm.formatCoordinates(): String =
+    "(${String.format(java.util.Locale.ROOT, "%.0f", x)}, ${String.format(java.util.Locale.ROOT, "%.0f", y)})"
+
+private fun angularDistance(first: Double, second: Double): Double {
+    val difference = kotlin.math.abs(PlanGeometry.normalizeAngle(first) - PlanGeometry.normalizeAngle(second))
+    return minOf(difference, 360.0 - difference)
+}
+
+private val METER_SERVICE_UUID: UUID = UUID.fromString("0000ffb0-0000-1000-8000-00805f9b34fb")
+private val MEASUREMENT_CHARACTERISTIC_UUID: UUID =
+    UUID.fromString("0000ffb2-0000-1000-8000-00805f9b34fb")
+private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+private const val SCAN_DURATION_MS = 12_000L
+private const val MAX_DXF_IMPORT_CHARS = 16 * 1024 * 1024
