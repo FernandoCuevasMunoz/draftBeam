@@ -50,6 +50,11 @@ data class WallSegment(
     val growthSide: WallGrowthSide = WallGrowthSide.LEFT
 )
 
+enum class WallEndpoint {
+    START,
+    END
+}
+
 object PlanGeometry {
     private val origin = PointMm(0.0, 0.0)
 
@@ -118,6 +123,48 @@ object PlanGeometry {
         require(widthMm >= 0) { "El ancho del muro no puede ser negativo." }
         return existingSegments.mapIndexed { segmentIndex, segment ->
             if (segmentIndex == index) segment.copy(widthMm = widthMm, growthSide = growthSide) else segment
+        }
+    }
+
+    fun endpointUseCount(segments: List<WallSegment>, point: PointMm): Int =
+        segments.sumOf { segment ->
+            (if (segment.start == point) 1 else 0) + (if (segment.end == point) 1 else 0)
+        }
+
+    /** Moves one endpoint, or every endpoint that shares its exact junction coordinate. */
+    fun moveEndpoint(
+        existingSegments: List<WallSegment>,
+        index: Int,
+        endpoint: WallEndpoint,
+        destination: PointMm,
+        moveConnectedEndpoints: Boolean = false
+    ): List<WallSegment> {
+        require(index in existingSegments.indices) { "No existe el muro seleccionado." }
+        val selectedSegment = existingSegments[index]
+        val origin = if (endpoint == WallEndpoint.START) selectedSegment.start else selectedSegment.end
+        val moveAll = moveConnectedEndpoints && endpointUseCount(existingSegments, origin) > 1
+        val anchor = if (endpoint == WallEndpoint.START) selectedSegment.end else selectedSegment.start
+        val snappedDestination = snapEndpointToAxis(anchor, destination)
+
+        return existingSegments.mapIndexed { segmentIndex, segment ->
+            val moveStart = if (moveAll) segment.start == origin
+                else segmentIndex == index && endpoint == WallEndpoint.START
+            val moveEnd = if (moveAll) segment.end == origin
+                else segmentIndex == index && endpoint == WallEndpoint.END
+            if (!moveStart && !moveEnd) segment else {
+                val newStart = if (moveStart) snappedDestination else segment.start
+                val newEnd = if (moveEnd) snappedDestination else segment.end
+                val dx = newEnd.x - newStart.x
+                val dy = newEnd.y - newStart.y
+                val length = hypot(dx, dy)
+                require(length >= MIN_DRAG_LENGTH_MM) { "El muro debe conservar una longitud mayor que cero." }
+                segment.copy(
+                    start = newStart,
+                    end = newEnd,
+                    lengthMm = length.roundToLong().coerceAtLeast(1),
+                    angleDegrees = normalizeAngle(Math.toDegrees(atan2(dy, dx)))
+                )
+            }
         }
     }
 
@@ -290,6 +337,21 @@ object PlanGeometry {
             angleDegrees = angleDegrees,
             growthSide = defaultGrowthSide(angleDegrees)
         )
+    }
+
+    private fun snapEndpointToAxis(anchor: PointMm, destination: PointMm): PointMm {
+        val deltaX = destination.x - anchor.x
+        val deltaY = destination.y - anchor.y
+        val draggedLength = hypot(deltaX, deltaY)
+        if (draggedLength < MIN_DRAG_LENGTH_MM) return destination
+
+        val rawAngle = normalizeAngle(Math.toDegrees(atan2(deltaY, deltaX)))
+        val nearestAxis = WallDirection.entries.minBy { angularDistance(rawAngle, it.angleDegrees) }
+        if (angularDistance(rawAngle, nearestAxis.angleDegrees) > DEFAULT_SNAP_TOLERANCE_DEGREES) {
+            return destination
+        }
+
+        return segmentFromLength(anchor, nearestAxis.angleDegrees, draggedLength.roundToLong().coerceAtLeast(1)).end
     }
 
     private fun angularDistance(first: Double, second: Double): Double {

@@ -117,6 +117,13 @@ private data class PendingConnection(
     val target: PointMm
 )
 
+data class PendingEndpointMove(
+    val segmentIndex: Int,
+    val endpoint: WallEndpoint,
+    val origin: PointMm,
+    val destination: PointMm
+)
+
 data class LengthMeasurement(val id: Int, val millimeters: Long)
 
 private class CreateDxfInDownloads : ActivityResultContract<String, Uri?>() {
@@ -152,7 +159,9 @@ class MainActivity : ComponentActivity() {
     private var lengthMeasurementEventId = 0
     private val selectedAngleDegrees = mutableStateOf(WallDirection.X_POSITIVE.angleDegrees)
     private val selectedWallIndex = mutableStateOf<Int?>(null)
+    private val wallEditorOpen = mutableStateOf(false)
     private val selectedStartPoint = mutableStateOf<PointMm?>(null)
+    private val pendingEndpointMove = mutableStateOf<PendingEndpointMove?>(null)
     private val selectedDeviceName = mutableStateOf<String?>(null)
     private val connectingDeviceName = mutableStateOf<String?>(null)
     private val dxfImportRevision = mutableIntStateOf(0)
@@ -377,6 +386,8 @@ class MainActivity : ComponentActivity() {
                     latestMeasurementMm = latestMeasurementMm.value,
                     selectedAngleDegrees = selectedAngleDegrees.value,
                     selectedWallIndex = selectedWallIndex.value,
+                    wallEditorOpen = wallEditorOpen.value,
+                    pendingEndpointMove = pendingEndpointMove.value,
                     lengthMeasurementEvent = lengthMeasurementEvent.value,
                     selectedStartPoint = selectedStartPoint.value,
                     selectedDeviceName = selectedDeviceName.value,
@@ -399,7 +410,14 @@ class MainActivity : ComponentActivity() {
                     onDirectionSelected = { selectedAngleDegrees.value = it.angleDegrees },
                     onDeleteWallClick = ::deleteSelectedWall,
                     onUndoClick = ::undoLastPlanAction,
-                    onWallSelected = { selectedWallIndex.value = it },
+                    onWallSelected = {
+                        selectedWallIndex.value = it
+                        wallEditorOpen.value = false
+                    },
+                    onEditWallClick = { wallEditorOpen.value = selectedWallIndex.value != null },
+                    onEndpointMoveRequested = ::requestEndpointMove,
+                    onMoveEndpoint = ::moveEndpoint,
+                    onDismissEndpointMove = { pendingEndpointMove.value = null },
                     onSaveWallProperties = { index, length, width, side ->
                         updateWallProperties(index, length, width, side).also { status.value = it }
                     },
@@ -409,12 +427,13 @@ class MainActivity : ComponentActivity() {
                     },
                     onDismissWallEditor = {
                         newLengthFieldFocused.value = false
-                        selectedWallIndex.value = null
+                        wallEditorOpen.value = false
                     },
                     onFingerDrawn = ::addWallFromFinger,
                     onStartPointSelected = { point ->
                         selectedStartPoint.value = point
                         selectedWallIndex.value = null
+                        wallEditorOpen.value = false
                         status.value = "Punto de continuación seleccionado: ${point.formatCoordinates()} mm."
                     }
                 )
@@ -513,6 +532,7 @@ class MainActivity : ComponentActivity() {
             val endpoint = updatedSegments.last().end
             selectedStartPoint.value = endpoint
             selectedWallIndex.value = null
+            wallEditorOpen.value = false
             return "Muro agregado automáticamente: $measurement mm a ${selectedAngleDegrees.value.formatAngle()}°. Extremo ${endpoint.formatCoordinates()} mm."
         } catch (exception: IllegalArgumentException) {
             return exception.message ?: "La medida no es válida para crear un muro."
@@ -529,9 +549,47 @@ class MainActivity : ComponentActivity() {
             selectedStartPoint.value = segment.end
             selectedAngleDegrees.value = segment.angleDegrees
             selectedWallIndex.value = null
+            wallEditorOpen.value = false
             status.value = "Muro dibujado: ${segment.lengthMm} mm a ${segment.angleDegrees.formatAngle()}°."
         } catch (exception: IllegalArgumentException) {
             status.value = exception.message ?: "No se pudo crear el muro."
+        }
+    }
+
+    private fun requestEndpointMove(
+        index: Int,
+        endpoint: WallEndpoint,
+        origin: PointMm,
+        destination: PointMm
+    ) {
+        if (PlanGeometry.endpointUseCount(wallSegments, origin) > 1) {
+            pendingEndpointMove.value = PendingEndpointMove(index, endpoint, origin, destination)
+        } else {
+            moveEndpoint(PendingEndpointMove(index, endpoint, origin, destination), moveConnected = false)
+        }
+    }
+
+    private fun moveEndpoint(move: PendingEndpointMove, moveConnected: Boolean) {
+        try {
+            val before = wallSegments.toList()
+            val updatedSegments = PlanGeometry.moveEndpoint(
+                existingSegments = before,
+                index = move.segmentIndex,
+                endpoint = move.endpoint,
+                destination = move.destination,
+                moveConnectedEndpoints = moveConnected
+            )
+            if (updatedSegments != before) {
+                pushPlanSnapshot()
+                wallSegments.clear()
+                wallSegments.addAll(updatedSegments)
+                if (selectedStartPoint.value == move.origin) selectedStartPoint.value = move.destination
+            }
+            pendingEndpointMove.value = null
+            status.value = if (moveConnected) "Unión movida." else "Extremo del muro movido."
+        } catch (exception: IllegalArgumentException) {
+            pendingEndpointMove.value = null
+            status.value = exception.message ?: "No se pudo mover el extremo del muro."
         }
     }
 
@@ -594,6 +652,8 @@ class MainActivity : ComponentActivity() {
             wallSegments.clear()
             wallSegments.addAll(imported.segments)
             selectedWallIndex.value = null
+            wallEditorOpen.value = false
+            pendingEndpointMove.value = null
             selectedStartPoint.value = imported.segments.lastOrNull()?.end
             dxfImportRevision.value++
             status.value = buildString {
@@ -613,6 +673,7 @@ class MainActivity : ComponentActivity() {
             wallSegments.clear()
             wallSegments.addAll(updatedSegments)
             selectedWallIndex.value = null
+            wallEditorOpen.value = false
             if (selectedStartPoint.value != null &&
                 selectedStartPoint.value != PointMm(0.0, 0.0) &&
                 updatedSegments.none { it.start == selectedStartPoint.value || it.end == selectedStartPoint.value }
@@ -641,6 +702,8 @@ class MainActivity : ComponentActivity() {
         wallSegments.addAll(previous.segments)
         selectedStartPoint.value = previous.selectedStartPoint
         selectedWallIndex.value = null
+        wallEditorOpen.value = false
+        pendingEndpointMove.value = null
         status.value = "Última acción del plano deshecha."
     }
 
@@ -673,6 +736,8 @@ fun DraftBeamScreen(
     latestMeasurementMm: Long?,
     selectedAngleDegrees: Double,
     selectedWallIndex: Int?,
+    wallEditorOpen: Boolean,
+    pendingEndpointMove: PendingEndpointMove?,
     lengthMeasurementEvent: LengthMeasurement?,
     selectedStartPoint: PointMm?,
     selectedDeviceName: String?,
@@ -687,6 +752,10 @@ fun DraftBeamScreen(
     onDeleteWallClick: () -> Unit,
     onUndoClick: () -> Unit,
     onWallSelected: (Int?) -> Unit,
+    onEditWallClick: () -> Unit,
+    onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
+    onMoveEndpoint: (PendingEndpointMove, Boolean) -> Unit,
+    onDismissEndpointMove: () -> Unit,
     onStartPointSelected: (PointMm) -> Unit,
     onSaveWallProperties: (Int, Long, Long, WallGrowthSide) -> String,
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
@@ -843,6 +912,7 @@ fun DraftBeamScreen(
                     onSegmentSelected = onWallSelected,
                     onStartPointSelected = onStartPointSelected,
                     onFingerDrawn = onFingerDrawn,
+                    onEndpointMoveRequested = onEndpointMoveRequested,
                     onConnectionRequested = { start, freeEnd, target ->
                         pendingConnection = PendingConnection(start, freeEnd, target)
                     },
@@ -966,7 +1036,7 @@ fun DraftBeamScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndoClick)
-                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null, { if (selectedWallIndex == null) Unit })
+                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null, onEditWallClick)
                     BottomAction(Icons.Filled.OpenWith, "Dirección", enabled = false, onClick = {})
                     BottomAction(Icons.Filled.FolderOpen, "Abrir", enabled = false, onClick = {})
                     BottomAction(Icons.Filled.Save, "Guardar", enabled = false, onClick = {})
@@ -1066,6 +1136,7 @@ fun DraftBeamScreen(
                         onSegmentSelected = onWallSelected,
                         onStartPointSelected = onStartPointSelected,
                         onFingerDrawn = onFingerDrawn,
+                        onEndpointMoveRequested = onEndpointMoveRequested,
                         onConnectionRequested = { start, freeEnd, target ->
                             pendingConnection = PendingConnection(start, freeEnd, target)
                         },
@@ -1090,8 +1161,27 @@ fun DraftBeamScreen(
         }
     }
 
-    val editingSegment = selectedWallIndex?.let(wallSegments::getOrNull)
-    if (selectedWallIndex != null && editingSegment != null) {
+    pendingEndpointMove?.let { move ->
+        val sharedCount = PlanGeometry.endpointUseCount(wallSegments, move.origin)
+        AlertDialog(
+            onDismissRequest = onDismissEndpointMove,
+            title = { Text("Mover unión") },
+            text = { Text("Este extremo está conectado a $sharedCount tramos. ¿Quieres mover solo este muro o toda la unión?") },
+            confirmButton = {
+                TextButton(onClick = { onMoveEndpoint(move, true) }) {
+                    Text("Toda la unión")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { onMoveEndpoint(move, false) }) {
+                    Text("Solo este muro")
+                }
+            }
+        )
+    }
+
+    val editingSegment = selectedWallIndex?.takeIf { wallEditorOpen }?.let(wallSegments::getOrNull)
+    if (wallEditorOpen && selectedWallIndex != null && editingSegment != null) {
         WallEditorSheet(
             segment = editingSegment,
             index = selectedWallIndex,
