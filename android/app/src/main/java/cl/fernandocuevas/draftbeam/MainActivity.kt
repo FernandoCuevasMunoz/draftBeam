@@ -174,6 +174,7 @@ class MainActivity : ComponentActivity() {
     private val selectedDeviceName = mutableStateOf<String?>(null)
     private val connectingDeviceName = mutableStateOf<String?>(null)
     private val dxfImportRevision = mutableIntStateOf(0)
+    private var currentDxfUri: Uri? = null
 
     private val bluetoothAdapter by lazy {
         (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
@@ -370,6 +371,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null) restoreLastOpenedDxf()
 
         setContent {
             DraftBeamTheme {
@@ -380,11 +382,19 @@ class MainActivity : ComponentActivity() {
                     else status.value = "Se necesitan permisos Bluetooth para buscar el medidor."
                 }
                 val saveDxfLauncher = rememberLauncherForActivityResult(CreateDxfInDownloads()) { uri ->
-                    uri?.let(::saveDxf)
+                    uri?.let {
+                        persistDocumentPermissions(it)
+                        saveDxf(it, associateDocument = true)
+                    }
                 }
                 val loadDxfLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument()
-                ) { uri -> uri?.let(::loadDxf) }
+                ) { uri ->
+                    uri?.let { selectedUri ->
+                        persistDocumentPermissions(selectedUri)
+                        if (loadDxf(selectedUri)) associateDxfUri(selectedUri)
+                    }
+                }
 
                 DraftBeamScreen(
                     status = status.value,
@@ -404,7 +414,17 @@ class MainActivity : ComponentActivity() {
                     selectedDeviceName = selectedDeviceName.value,
                     connectingDeviceName = connectingDeviceName.value,
                     dxfImportRevision = dxfImportRevision.value,
-                    onSaveDxfClick = { saveDxfLauncher.launch("draftBeam.dxf") },
+                    onSaveDxfClick = {
+                        val openedUri = currentDxfUri
+                        if (openedUri != null && hasPersistedWritePermission(openedUri)) {
+                            if (!saveDxf(openedUri)) saveDxfLauncher.launch("draftBeam.dxf")
+                        } else {
+                            if (openedUri != null) {
+                                status.value = "El archivo abierto no permite guardar cambios; elige una ubicación nueva."
+                            }
+                            saveDxfLauncher.launch("draftBeam.dxf")
+                        }
+                    },
                     onLoadDxfClick = {
                         loadDxfLauncher.launch(
                             arrayOf("application/dxf", "application/x-dxf", "image/vnd.dxf", "application/octet-stream", "*/*")
@@ -698,20 +718,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveDxf(uri: Uri) {
+    private fun saveDxf(uri: Uri, associateDocument: Boolean = false): Boolean {
         try {
-            val output = contentResolver.openOutputStream(uri)
+            val output = contentResolver.openOutputStream(uri, "wt")
                 ?: throw IllegalStateException("Android no pudo abrir el archivo para escritura.")
             output.bufferedWriter(Charsets.UTF_8).use { writer ->
                 writer.write(DxfCodec.encode(wallSegments.toList(), planNotes.toList()))
             }
-            status.value = "Plano guardado como DXF en la ubicación elegida."
+            if (associateDocument) associateDxfUri(uri)
+            status.value = if (uri == currentDxfUri && !associateDocument) {
+                "Cambios guardados en el archivo DXF abierto."
+            } else {
+                "Plano guardado como DXF en la ubicación elegida."
+            }
+            return true
         } catch (exception: Exception) {
-            status.value = "No se pudo guardar el DXF: ${exception.message ?: "error de archivo"}"
+            if (!associateDocument && uri == currentDxfUri) {
+                status.value = "No se pudo actualizar el archivo; elige dónde guardar una copia."
+            } else {
+                status.value = "No se pudo guardar el DXF: ${exception.message ?: "error de archivo"}"
+            }
+            return false
         }
     }
 
-    private fun loadDxf(uri: Uri) {
+    private fun loadDxf(uri: Uri): Boolean {
         try {
             val input = contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("Android no pudo abrir el archivo seleccionado.")
@@ -745,8 +776,52 @@ class MainActivity : ComponentActivity() {
                 append("DXF cargado: ${imported.segments.size} entidades editables.")
                 imported.warnings.forEach { append(" ").append(it) }
             }
+            return true
         } catch (exception: Exception) {
             status.value = "No se pudo cargar el DXF: ${exception.message ?: "archivo no válido"}"
+            return false
+        }
+    }
+
+    private fun restoreLastOpenedDxf() {
+        val uri = getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE)
+            .getString(DXF_URI_KEY, null)
+            ?.let(Uri::parse)
+            ?: return
+        val permission = contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri }
+        if (permission?.isReadPermission != true) {
+            getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit().remove(DXF_URI_KEY).apply()
+            return
+        }
+        persistDocumentPermissions(uri)
+        if (loadDxf(uri)) associateDxfUri(uri)
+    }
+
+    private fun persistDocumentPermissions(uri: Uri) {
+        listOf(Intent.FLAG_GRANT_READ_URI_PERMISSION, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            .forEach { flag ->
+                try {
+                    contentResolver.takePersistableUriPermission(uri, flag)
+                } catch (_: SecurityException) {
+                    // This provider may not grant persistence or this access mode.
+                } catch (_: IllegalArgumentException) {
+                    // The picker result did not include a persistable grant.
+                }
+            }
+    }
+
+    private fun hasPersistedWritePermission(uri: Uri): Boolean =
+        contentResolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
+
+    private fun associateDxfUri(uri: Uri) {
+        currentDxfUri = uri
+        val permissions = contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri }
+        if (permissions?.isReadPermission == true) {
+            getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit()
+                .putString(DXF_URI_KEY, uri.toString())
+                .apply()
+        } else {
+            getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit().remove(DXF_URI_KEY).apply()
         }
     }
 
@@ -868,6 +943,8 @@ fun DraftBeamScreen(
     onFingerDrawn: (PointMm, PointMm) -> Unit
 ) {
     val viewport = remember { PlanViewportState() }
+    var snapOptions by remember { mutableStateOf(DraftSnapOptions()) }
+    var showSnapControls by remember { mutableStateOf(false) }
     var showMeasurements by remember { mutableStateOf(false) }
     var showFullscreenPlan by remember { mutableStateOf(false) }
     var showReplaceDxfConfirmation by remember { mutableStateOf(false) }
@@ -895,6 +972,29 @@ fun DraftBeamScreen(
         overflowMenuExpanded = false
         showBleDialog = true
         onScanClick()
+    }
+    val editSelectedObject: () -> Unit = {
+        val noteIndex = selectedNoteIndex
+        if (noteIndex != null) {
+            notes.getOrNull(noteIndex)?.let { note ->
+                noteEditIndex = noteIndex
+                noteTextDraft = note.text
+                showNoteDialog = true
+            }
+        } else {
+            focusWallWidth = false
+            onEditWallClick()
+        }
+        Unit
+    }
+    val addNoteAction = {
+        if (pendingNoteText != null) {
+            pendingNoteText = null
+        } else {
+            noteEditIndex = null
+            noteTextDraft = ""
+            showNoteDialog = true
+        }
     }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -976,6 +1076,19 @@ fun DraftBeamScreen(
                             DropdownMenuItem(
                                 text = {
                                     Text(
+                                        if (showMeasurements) "Ocultar mediciones (${notifications.size})"
+                                        else "Mediciones (${notifications.size})"
+                                    )
+                                },
+                                leadingIcon = { Icon(Icons.Filled.Straighten, contentDescription = null) },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    showMeasurements = !showMeasurements
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
                                         if (selectedDeviceName == null && connectingDeviceName == null) "Conectar BLE"
                                         else "Cambiar medidor"
                                     )
@@ -1003,6 +1116,7 @@ fun DraftBeamScreen(
                     selectedSegmentIndex = selectedWallIndex,
                     selectedNoteIndex = selectedNoteIndex,
                     pendingNotePlacement = pendingNoteText != null,
+                    snapOptions = snapOptions,
                     selectedStartPoint = selectedStartPoint,
                     selectedAngleDegrees = selectedAngleDegrees,
                     viewport = viewport,
@@ -1064,26 +1178,17 @@ fun DraftBeamScreen(
                         Text("Ampliar", maxLines = 1)
                     }
                 }
-                Column(
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OverlayIconButton(
-                        icon = Icons.Filled.CenterFocusStrong,
-                        label = "Ajustar plano",
-                        enabled = true,
-                        onClick = { viewport.fitToContent(wallSegments, notes) }
-                    )
-                    OverlayIconButton(
-                        icon = Icons.Filled.Layers,
-                        label = "Capas (próximamente)",
-                        enabled = false,
-                        onClick = {}
-                    )
-                }
+                SnapToolsOverlay(
+                    expanded = showSnapControls,
+                    snapOptions = snapOptions,
+                    onSnapOptionsChange = { snapOptions = it },
+                    onToggleSnapControls = { showSnapControls = !showSnapControls },
+                    onFit = { viewport.fitToContent(wallSegments, notes) },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                )
             }
 
-            Surface(
+            if (showMeasurements) Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = DraftBeamColors.PanelBackground,
                 shape = RoundedCornerShape(20.dp)
@@ -1117,25 +1222,20 @@ fun DraftBeamScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        TextButton(onClick = { showMeasurements = !showMeasurements }) {
-                            Text(if (showMeasurements) "Ocultar (${notifications.size})" else "Mediciones (${notifications.size})")
-                        }
                     }
-                    if (showMeasurements) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                        Column(
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 116.dp).verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (notifications.isEmpty()) {
-                                Text("Aún no se reciben notificaciones.", style = MaterialTheme.typography.bodySmall)
-                            } else {
-                                notifications.forEach { measurement ->
-                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        measurement.millimeters?.let { Text("Medida: $it mm") }
-                                        measurement.parseError?.let { Text("No interpretada: $it", color = MaterialTheme.colorScheme.error) }
-                                        Text("Bytes: ${measurement.rawHex}", style = MaterialTheme.typography.labelSmall)
-                                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    Column(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 116.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (notifications.isEmpty()) {
+                            Text("Aún no se reciben notificaciones.", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            notifications.forEach { measurement ->
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    measurement.millimeters?.let { Text("Medida: $it mm") }
+                                    measurement.parseError?.let { Text("No interpretada: $it", color = MaterialTheme.colorScheme.error) }
+                                    Text("Bytes: ${measurement.rawHex}", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         }
@@ -1143,47 +1243,20 @@ fun DraftBeamScreen(
                 }
             }
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = DraftBeamColors.PanelBackground,
-                shape = RoundedCornerShape(22.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    BottomAction(Icons.Filled.Add, "Nueva línea", enabled = true, onClick = { showNewWallSheet = true }, modifier = Modifier.weight(1f))
-                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null || selectedNoteIndex != null, onClick = {
-                        val noteIndex = selectedNoteIndex
-                        if (noteIndex != null) {
-                            notes.getOrNull(noteIndex)?.let { note ->
-                                noteEditIndex = noteIndex
-                                noteTextDraft = note.text
-                                showNoteDialog = true
-                            }
-                        } else {
-                            focusWallWidth = false
-                            onEditWallClick()
-                        }
-                    }, modifier = Modifier.weight(1f))
-                    BottomAction(Icons.Filled.Delete, "Eliminar", selectedWallIndex != null || selectedNoteIndex != null, onDeleteWallClick, modifier = Modifier.weight(1f))
-                    BottomAction(Icons.Filled.Straighten, "Ancho", selectedWallIndex != null, onClick = {
-                        focusWallWidth = true
-                        onEditWallClick()
-                    }, modifier = Modifier.weight(1f))
-                    BottomAction(Icons.AutoMirrored.Filled.NoteAdd, "Agregar nota", enabled = true, onClick = {
-                        if (pendingNoteText != null) {
-                            pendingNoteText = null
-                        } else {
-                            noteEditIndex = null
-                            noteTextDraft = ""
-                            showNoteDialog = true
-                        }
-                    }, modifier = Modifier.weight(1f))
-                    BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndoClick, modifier = Modifier.weight(1f))
-                }
-            }
+            PlanActionBar(
+                hasWallSelection = selectedWallIndex != null,
+                hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null,
+                canUndo = canUndo,
+                onNewLine = { showNewWallSheet = true },
+                onEdit = editSelectedObject,
+                onDelete = onDeleteWallClick,
+                onWidth = {
+                    focusWallWidth = true
+                    onEditWallClick()
+                },
+                onAddNote = addNoteAction,
+                onUndo = onUndoClick
+            )
         }
     }
 
@@ -1268,44 +1341,55 @@ fun DraftBeamScreen(
                         Text("Plano (${wallSegments.size} muros)")
                         TextButton(onClick = { showFullscreenPlan = false }) { Text("Volver") }
                     }
-                    PlanPreview(
-                        segments = wallSegments,
-                        notes = notes,
-                        selectedSegmentIndex = selectedWallIndex,
-                        selectedNoteIndex = selectedNoteIndex,
-                        pendingNotePlacement = pendingNoteText != null,
-                        selectedStartPoint = selectedStartPoint,
-                        selectedAngleDegrees = selectedAngleDegrees,
-                        viewport = viewport,
-                        onDirectionSelected = onDirectionSelected,
-                        onSegmentSelected = onWallSelected,
-                        onNoteSelected = onNoteSelected,
-                        onNotePlaced = { position -> pendingNoteText?.let { text ->
-                            onNotePlaced(text, position)
-                            pendingNoteText = null
-                        } },
-                        onStartPointSelected = onStartPointSelected,
-                        onFingerDrawn = onFingerDrawn,
-                        onEndpointMoveRequested = onEndpointMoveRequested,
-                        onConnectionRequested = { start, freeEnd, target ->
-                            pendingConnection = PendingConnection(start, freeEnd, target)
-                        },
-                        modifier = Modifier.fillMaxWidth().weight(1f)
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = { viewport.fitToContent(wallSegments, notes) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Ajustar plano") }
-                        Button(
-                            onClick = onUndoClick,
-                            enabled = canUndo,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Deshacer") }
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                        PlanPreview(
+                            segments = wallSegments,
+                            notes = notes,
+                            selectedSegmentIndex = selectedWallIndex,
+                            selectedNoteIndex = selectedNoteIndex,
+                            pendingNotePlacement = pendingNoteText != null,
+                            snapOptions = snapOptions,
+                            selectedStartPoint = selectedStartPoint,
+                            selectedAngleDegrees = selectedAngleDegrees,
+                            viewport = viewport,
+                            onDirectionSelected = onDirectionSelected,
+                            onSegmentSelected = onWallSelected,
+                            onNoteSelected = onNoteSelected,
+                            onNotePlaced = { position -> pendingNoteText?.let { text ->
+                                onNotePlaced(text, position)
+                                pendingNoteText = null
+                            } },
+                            onStartPointSelected = onStartPointSelected,
+                            onFingerDrawn = onFingerDrawn,
+                            onEndpointMoveRequested = onEndpointMoveRequested,
+                            onConnectionRequested = { start, freeEnd, target ->
+                                pendingConnection = PendingConnection(start, freeEnd, target)
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        SnapToolsOverlay(
+                            expanded = showSnapControls,
+                            snapOptions = snapOptions,
+                            onSnapOptionsChange = { snapOptions = it },
+                            onToggleSnapControls = { showSnapControls = !showSnapControls },
+                            onFit = { viewport.fitToContent(wallSegments, notes) },
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+                        )
                     }
+                    PlanActionBar(
+                        hasWallSelection = selectedWallIndex != null,
+                        hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null,
+                        canUndo = canUndo,
+                        onNewLine = { showNewWallSheet = true },
+                        onEdit = editSelectedObject,
+                        onDelete = onDeleteWallClick,
+                        onWidth = {
+                            focusWallWidth = true
+                            onEditWallClick()
+                        },
+                        onAddNote = addNoteAction,
+                        onUndo = onUndoClick
+                    )
                 }
             }
         }
@@ -1433,14 +1517,100 @@ private fun OverlayIconButton(
     icon: ImageVector,
     label: String,
     enabled: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (enabled) 0.96f else 0.65f),
-        shape = RoundedCornerShape(16.dp)
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier
     ) {
         IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(52.dp)) {
             Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun PlanActionBar(
+    hasWallSelection: Boolean,
+    hasAnySelection: Boolean,
+    canUndo: Boolean,
+    onNewLine: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onWidth: () -> Unit,
+    onAddNote: () -> Unit,
+    onUndo: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = DraftBeamColors.PanelBackground,
+        shape = RoundedCornerShape(22.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BottomAction(Icons.Filled.Add, "Nueva línea", true, onNewLine, Modifier.weight(1f))
+            BottomAction(Icons.Filled.Edit, "Editar", hasAnySelection, onEdit, Modifier.weight(1f))
+            BottomAction(Icons.Filled.Delete, "Eliminar", hasAnySelection, onDelete, Modifier.weight(1f))
+            BottomAction(Icons.Filled.Straighten, "Ancho", hasWallSelection, onWidth, Modifier.weight(1f))
+            BottomAction(Icons.AutoMirrored.Filled.NoteAdd, "Agregar nota", true, onAddNote, Modifier.weight(1f))
+            BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndo, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun SnapToolsOverlay(
+    expanded: Boolean,
+    snapOptions: DraftSnapOptions,
+    onSnapOptionsChange: (DraftSnapOptions) -> Unit,
+    onToggleSnapControls: () -> Unit,
+    onFit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Bottom
+    ) {
+        if (expanded) {
+            SnapControlPanel(
+                options = snapOptions,
+                onOptionsChange = onSnapOptionsChange,
+                modifier = Modifier.width(260.dp)
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.End) {
+            OverlayIconButton(
+                icon = Icons.Filled.CenterFocusStrong,
+                label = "Ajustar plano",
+                enabled = true,
+                onClick = onFit
+            )
+            OverlayIconButton(
+                icon = Icons.Filled.Layers,
+                label = "Capas (próximamente)",
+                enabled = false,
+                onClick = {}
+            )
+            OutlinedButton(
+                onClick = onToggleSnapControls,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, DraftBeamColors.TechnicalBlue),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = DraftBeamColors.PanelBackground.copy(alpha = 0.96f),
+                    contentColor = DraftBeamColors.LaserCyan
+                )
+            ) {
+                Icon(Icons.Filled.Straighten, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(if (expanded) "Ocultar" else "Capturas", style = MaterialTheme.typography.labelMedium)
+            }
         }
     }
 }
@@ -1835,3 +2005,5 @@ private val MEASUREMENT_CHARACTERISTIC_UUID: UUID =
 private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 private const val SCAN_DURATION_MS = 12_000L
 private const val MAX_DXF_IMPORT_CHARS = 16 * 1024 * 1024
+private const val DXF_PREFERENCES = "dxf_document_preferences"
+private const val DXF_URI_KEY = "associated_dxf_uri"

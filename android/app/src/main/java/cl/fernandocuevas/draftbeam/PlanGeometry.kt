@@ -72,6 +72,26 @@ enum class WallEndpoint {
     END
 }
 
+data class DraftSnapOptions(
+    val endpointTrackingEnabled: Boolean = true,
+    val endpointMagnetEnabled: Boolean = true
+)
+
+enum class DraftSnapType {
+    ENDPOINT,
+    TRACKING
+}
+
+data class DraftSnapGuide(val anchor: PointMm, val angleDegrees: Double)
+
+data class DraftSnapResult(
+    val point: PointMm,
+    val type: DraftSnapType? = null,
+    val target: PointMm? = null,
+    val capturedAnchor: PointMm? = null,
+    val guides: List<DraftSnapGuide> = emptyList()
+)
+
 object PlanGeometry {
     private val origin = PointMm(0.0, 0.0)
 
@@ -124,6 +144,82 @@ object PlanGeometry {
         }
 
         return segmentFromLength(start, angle, draggedLength.roundToLong().coerceAtLeast(1))
+    }
+
+    /** Resolves endpoint capture and orthogonal guides acquired from nearby wall endpoints. */
+    fun resolveDraftSnap(
+        start: PointMm,
+        cursor: PointMm,
+        segments: List<WallSegment>,
+        options: DraftSnapOptions,
+        acquiredAnchors: List<PointMm>,
+        toleranceMm: Double
+    ): DraftSnapResult {
+        require(toleranceMm >= 0.0 && toleranceMm.isFinite()) { "La tolerancia de captura no es válida." }
+        val endpoints = (listOf(origin) + wallInteractionPoints(segments))
+            .distinct()
+            .filterNot { it == start }
+        val nearbyEndpoint = endpoints.map { point -> point to distance(point, cursor) }
+            .filter { (_, distance) -> distance <= toleranceMm }
+            .minByOrNull { it.second }?.first
+        val anchors = (acquiredAnchors + listOfNotNull(nearbyEndpoint))
+            .distinct()
+            .takeLast(MAX_TRACKING_ANCHORS)
+        val trackingGuides = if (options.endpointTrackingEnabled) {
+            anchors.flatMap { anchor ->
+                listOf(DraftSnapGuide(anchor, 0.0), DraftSnapGuide(anchor, 90.0))
+            }
+        } else {
+            emptyList()
+        }
+
+        if (nearbyEndpoint != null && options.endpointMagnetEnabled) {
+            return DraftSnapResult(
+                point = nearbyEndpoint,
+                type = DraftSnapType.ENDPOINT,
+                target = nearbyEndpoint,
+                capturedAnchor = if (options.endpointTrackingEnabled) nearbyEndpoint else null,
+                guides = trackingGuides
+            )
+        }
+
+        val trackCandidates = mutableListOf<Pair<PointMm, DraftSnapGuide>>()
+        trackingGuides.forEach { guide ->
+            val angle = Math.toRadians(guide.angleDegrees)
+            val unitX = cos(angle)
+            val unitY = sin(angle)
+            val projection = projectToLine(cursor, guide.anchor, unitX, unitY)
+            if (distance(projection, cursor) <= toleranceMm) trackCandidates += projection to guide
+        }
+        if (trackingGuides.isNotEmpty()) {
+            val verticals = trackingGuides.filter { it.angleDegrees == 90.0 }
+            val horizontals = trackingGuides.filter { it.angleDegrees == 0.0 }
+            verticals.forEach { vertical ->
+                horizontals.forEach { horizontal ->
+                    val intersection = PointMm(vertical.anchor.x, horizontal.anchor.y)
+                    if (distance(intersection, cursor) <= toleranceMm) {
+                        trackCandidates += intersection to vertical
+                    }
+                }
+            }
+        }
+
+        val nearestTrack = trackCandidates.minByOrNull { distance(it.first, cursor) }
+        return if (nearestTrack == null) {
+            DraftSnapResult(
+                point = cursor,
+                capturedAnchor = if (options.endpointTrackingEnabled) nearbyEndpoint else null,
+                guides = trackingGuides
+            )
+        } else {
+            DraftSnapResult(
+                point = nearestTrack.first,
+                type = DraftSnapType.TRACKING,
+                target = nearestTrack.first,
+                capturedAnchor = if (options.endpointTrackingEnabled) nearbyEndpoint else null,
+                guides = trackingGuides
+            )
+        }
     }
 
     fun updateSegmentLength(
@@ -332,6 +428,16 @@ object PlanGeometry {
     private fun distance(first: PointMm, second: PointMm): Double =
         hypot(first.x - second.x, first.y - second.y)
 
+    private fun projectToLine(point: PointMm, anchor: PointMm, unitX: Double, unitY: Double): PointMm {
+        val along = (point.x - anchor.x) * unitX + (point.y - anchor.y) * unitY
+        return PointMm(anchor.x + unitX * along, anchor.y + unitY * along)
+    }
+
+    private fun angularDistance(first: Double, second: Double): Double {
+        val difference = kotlin.math.abs(normalizeAngle(first) - normalizeAngle(second))
+        return minOf(difference, 360.0 - difference)
+    }
+
     /** Removes only the selected entity; every other segment keeps its original coordinates. */
     fun removeSegment(existingSegments: List<WallSegment>, index: Int): List<WallSegment> {
         require(index in existingSegments.indices) { "No existe el muro seleccionado." }
@@ -393,12 +499,8 @@ object PlanGeometry {
         return segmentFromLength(anchor, nearestAxis.angleDegrees, draggedLength.roundToLong().coerceAtLeast(1)).end
     }
 
-    private fun angularDistance(first: Double, second: Double): Double {
-        val difference = kotlin.math.abs(normalizeAngle(first) - normalizeAngle(second))
-        return minOf(difference, 360.0 - difference)
-    }
-
     private const val MIN_DRAG_LENGTH_MM = 1.0
     private const val GEOMETRY_EPSILON = 1e-7
     const val DEFAULT_SNAP_TOLERANCE_DEGREES = 8.0
+    private const val MAX_TRACKING_ANCHORS = 8
 }

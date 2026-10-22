@@ -6,6 +6,55 @@ import org.junit.Test
 
 class DxfCodecTest {
     @Test
+    fun alignedDimensionUsesIntegerMillimetersAndSitsBesideContinuousDimensionLine() {
+        val segment = WallSegment(
+            start = PointMm(0.0, 0.0),
+            end = PointMm(1_234.5, 0.0),
+            lengthMm = 1_235,
+            angleDegrees = 0.0,
+            growthSide = WallGrowthSide.LEFT
+        )
+
+        val dxf = DxfCodec.encode(listOf(segment))
+        val dimension = entitiesOfType(dxf, "DIMENSION").single()
+        val text = entitiesOfType(dxf, "MTEXT").single()
+        val lines = entitiesOfType(dxf, "LINE")
+
+        assertTrue(dxf.contains("\n\$DIMDEC\n70\n0\n"))
+        assertTrue(dxf.contains("\n271\n0\n")) // DIMSTYLE linear precision
+        assertEquals("1235", dimension[1]) // explicit integer text override, without grouping
+        assertEquals("1235", text[1])
+        assertEquals("617.25", text[10])
+        assertEquals("360", text[20]) // 50 mm half-height + 10 mm clearance from y=300 dimension line
+        assertEquals("0", text[50]) // keep the text aligned with the horizontal dimension
+        assertEquals("5", text[71]) // centered attachment retained
+        assertTrue(lines.any { line ->
+            line[10] == "0" && line[20] == "300" && line[11] == "1234.5" && line[21] == "300"
+        }) // dimension line remains continuous behind/beside the label
+    }
+
+    @Test
+    fun diagonalDimensionTextKeepsItsAngleAndMovesBesideTheDimensionLine() {
+        val segment = WallSegment(
+            start = PointMm(0.0, 0.0),
+            end = PointMm(1_000.0, 1_000.0),
+            lengthMm = 1_414,
+            angleDegrees = 45.0,
+            growthSide = WallGrowthSide.LEFT
+        )
+
+        val text = entitiesOfType(DxfCodec.encode(listOf(segment)), "MTEXT").single()
+        val textPosition = PointMm(text.getValue(10).toDouble(), text.getValue(20).toDouble())
+        val rootTwo = kotlin.math.sqrt(2.0)
+        val lineMidpoint = PointMm(500.0 - 300.0 / rootTwo, 500.0 + 300.0 / rootTwo)
+        val distanceFromDimensionLine =
+            ((textPosition.x - lineMidpoint.x) * -1.0 + (textPosition.y - lineMidpoint.y)) / rootTwo
+
+        assertEquals(45.0, text.getValue(50).toDouble(), 0.000001)
+        assertEquals(60.0, distanceFromDimensionLine, 0.000001)
+    }
+
+    @Test
     fun exportAndImportPreserveAxisWallWidthAndGrowthSide() {
         val source = listOf(
             WallSegment(
@@ -63,6 +112,26 @@ class DxfCodecTest {
         assertTrue(dxf.contains("\nTEXT\n"))
         assertEquals(listOf(note), DxfCodec.decode(dxf).notes)
         assertTrue(DxfCodec.decode(dxf).warnings.isEmpty())
+    }
+
+    private fun entitiesOfType(dxf: String, type: String): List<Map<Int, String>> {
+        val lines = dxf.trim().lines()
+        val entities = mutableListOf<Map<Int, String>>()
+        var index = 0
+        while (index + 1 < lines.size) {
+            if (lines[index] != "0" || lines[index + 1] != type) {
+                index++
+                continue
+            }
+            index += 2
+            val fields = linkedMapOf<Int, String>()
+            while (index + 1 < lines.size && lines[index] != "0") {
+                lines[index].toIntOrNull()?.let { code -> fields[code] = lines[index + 1] }
+                index += 2
+            }
+            entities += fields
+        }
+        return entities
     }
 
     @Test
