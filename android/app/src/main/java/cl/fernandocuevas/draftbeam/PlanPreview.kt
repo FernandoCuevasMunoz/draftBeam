@@ -55,10 +55,12 @@ fun PlanPreview(
     onSegmentSelected: (Int?) -> Unit,
     onStartPointSelected: (PointMm) -> Unit,
     onFingerDrawn: (PointMm, PointMm) -> Unit,
+    onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
     onConnectionRequested: (PointMm, PointMm, PointMm) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val draftSegment = remember { mutableStateOf<WallSegment?>(null) }
+    val endpointDragPreview = remember { mutableStateOf<EndpointDragPreview?>(null) }
     val magnifier = remember { mutableStateOf<MagnifierState?>(null) }
     val centerCoordinate = viewport.centerPoint
     val canvasBackground = DraftBeamColors.BackgroundDeep
@@ -74,7 +76,19 @@ fun PlanPreview(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val size = this.size
                     val endpointSnapTolerancePx = ENDPOINT_SNAP_TOLERANCE_DP.dp.toPx()
-                    val endpoint = findEndpointAt(
+                    val selectedEndpoint = selectedSegmentIndex
+                        ?.let { index ->
+                            segments.getOrNull(index)?.let { segment ->
+                                listOf(WallEndpoint.START to segment.start, WallEndpoint.END to segment.end)
+                                    .map { (kind, point) ->
+                                        kind to (point to (down.position - viewport.project(point, size)).getDistance())
+                                    }
+                                    .filter { (_, pointAndDistance) -> pointAndDistance.second <= 34.dp.toPx() }
+                                    .minByOrNull { (_, pointAndDistance) -> pointAndDistance.second }
+                                    ?.let { (kind, pointAndDistance) -> Triple(index, kind, pointAndDistance.first) }
+                            }
+                        }
+                    val endpoint = selectedEndpoint?.third ?: findEndpointAt(
                         segments, down.position, size, viewport, 34.dp.toPx()
                     )
                     val segmentIndex = if (endpoint == null) {
@@ -127,13 +141,23 @@ fun PlanPreview(
 
                         when {
                             endpoint != null && mode == GestureMode.TAP && movement > viewConfiguration.touchSlop -> {
-                                mode = GestureMode.DRAW
-                                val worldEnd = viewport.unproject(currentPosition, size)
-                                draftSegment.value = makePreviewSegment(endpoint, worldEnd)
-                                magnifier.value = findNearbyEndpoint(
-                                    segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
-                                )
-                                    ?.let { MagnifierState(currentPosition, worldEnd, it) }
+                                if (selectedEndpoint != null) {
+                                    mode = GestureMode.MOVE_ENDPOINT
+                                    endpointDragPreview.value = EndpointDragPreview(
+                                        selectedEndpoint.first,
+                                        selectedEndpoint.second,
+                                        endpoint,
+                                        viewport.unproject(currentPosition, size)
+                                    )
+                                } else {
+                                    mode = GestureMode.DRAW
+                                    val worldEnd = viewport.unproject(currentPosition, size)
+                                    draftSegment.value = makePreviewSegment(endpoint, worldEnd)
+                                    magnifier.value = findNearbyEndpoint(
+                                        segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
+                                    )
+                                        ?.let { MagnifierState(currentPosition, worldEnd, it) }
+                                }
                                 change.consume()
                             }
                             endpoint == null && mode == GestureMode.TAP && movement > viewConfiguration.touchSlop -> {
@@ -154,6 +178,12 @@ fun PlanPreview(
                                     ?.let { MagnifierState(currentPosition, worldEnd, it) }
                                 change.consume()
                             }
+                            mode == GestureMode.MOVE_ENDPOINT -> {
+                                endpointDragPreview.value = endpointDragPreview.value?.copy(
+                                    destination = viewport.unproject(currentPosition, size)
+                                )
+                                change.consume()
+                            }
                         }
                         lastPosition = currentPosition
 
@@ -162,8 +192,12 @@ fun PlanPreview(
                             when (mode) {
                                 GestureMode.TAP -> {
                                     if (endpoint != null) {
-                                        onSegmentSelected(null)
-                                        onStartPointSelected(endpoint)
+                                        if (selectedEndpoint != null) {
+                                            onSegmentSelected(selectedEndpoint.first)
+                                        } else {
+                                            onSegmentSelected(null)
+                                            onStartPointSelected(endpoint)
+                                        }
                                     } else {
                                         onSegmentSelected(segmentIndex)
                                     }
@@ -186,6 +220,18 @@ fun PlanPreview(
                                         onFingerDrawn(endpoint, drawnEnd)
                                     }
                                 }
+                                GestureMode.MOVE_ENDPOINT -> {
+                                    val preview = endpointDragPreview.value
+                                    endpointDragPreview.value = null
+                                    preview?.let {
+                                        onEndpointMoveRequested(
+                                            it.segmentIndex,
+                                            it.endpoint,
+                                            it.origin,
+                                            viewport.unproject(currentPosition, size)
+                                        )
+                                    }
+                                }
                                 GestureMode.PAN -> Unit
                                 GestureMode.PINCH -> Unit
                             }
@@ -193,11 +239,22 @@ fun PlanPreview(
                     }
 
                     draftSegment.value = null
+                    endpointDragPreview.value = null
                     magnifier.value = null
                 }
             }
     ) {
         val size = IntSize(size.width.toInt(), size.height.toInt())
+        val renderSegments = endpointDragPreview.value?.let { preview ->
+            runCatching {
+                PlanGeometry.moveEndpoint(
+                    segments,
+                    preview.segmentIndex,
+                    preview.endpoint,
+                    preview.destination
+                )
+            }.getOrNull()
+        } ?: segments
         val nativeCanvas = drawContext.canvas.nativeCanvas
         val clipSave = nativeCanvas.save()
         nativeCanvas.clipRect(0f, 0f, size.width.toFloat(), size.height.toFloat())
@@ -281,7 +338,7 @@ fun PlanPreview(
             nativeCanvas.drawText("0,0", originOnScreen.x + 6.dp.toPx(), originOnScreen.y + 15.dp.toPx(), paint)
         }
 
-        val wallShapes = PlanGeometry.wallFootprints(segments)
+        val wallShapes = PlanGeometry.wallFootprints(renderSegments)
         val dimensionTextSize = scaledDimensionTextSize(
             pixelsPerMillimeter = viewport.pixelsPerMillimeter,
             density = 1.dp.toPx()
@@ -290,10 +347,10 @@ fun PlanPreview(
             pixelsPerMillimeter = viewport.pixelsPerMillimeter,
             density = 1.dp.toPx()
         )
-        segments.forEachIndexed { index, segment ->
+        renderSegments.forEachIndexed { index, segment ->
             val start = viewport.project(segment.start, size)
             val end = viewport.project(segment.end, size)
-            val lineColor = if (index == selectedSegmentIndex) DraftBeamColors.LaserCyan else WALL_COLOR
+            val lineColor = if (index == selectedSegmentIndex) WALL_ORANGE else WALL_COLOR
             val strokeWidth = if (index == selectedSegmentIndex) 7.dp.toPx() else 4.dp.toPx()
             val worldFootprints = wallShapes[index]
             if (worldFootprints.isNotEmpty()) {
@@ -349,17 +406,17 @@ fun PlanPreview(
         }
 
         selectedSegmentIndex?.let { index ->
-            segments.getOrNull(index)?.let { segment ->
+            renderSegments.getOrNull(index)?.let { segment ->
                 listOf(segment.start, segment.end).forEach { endpoint ->
                     val point = viewport.project(endpoint, size)
                     drawCircle(DraftBeamColors.BackgroundDeep, 8.dp.toPx(), point)
-                    drawCircle(DraftBeamColors.LaserCyan, 6.dp.toPx(), point)
+                    drawCircle(WALL_ORANGE, 6.dp.toPx(), point)
                     drawCircle(DraftBeamColors.BackgroundDeep, 2.5.dp.toPx(), point)
                 }
             }
         }
 
-        val connectedPoints = segments
+        val connectedPoints = renderSegments
             .flatMap { listOf(it.start, it.end) }
             .groupingBy { it }
             .eachCount()
@@ -374,7 +431,10 @@ fun PlanPreview(
             )
         }
 
-        val activePoint = selectedStartPoint ?: segments.lastOrNull()?.end ?: PointMm(0.0, 0.0)
+        val activePoint = selectedStartPoint
+            ?.let { point -> endpointDragPreview.value?.takeIf { it.origin == point }?.destination ?: point }
+            ?: renderSegments.lastOrNull()?.end
+            ?: PointMm(0.0, 0.0)
         val target = viewport.project(activePoint, size)
         val targetHalf = 9.dp.toPx()
         drawRect(canvasBackground, Offset(target.x - targetHalf, target.y - targetHalf), androidx.compose.ui.geometry.Size(targetHalf * 2, targetHalf * 2))
@@ -555,7 +615,14 @@ private val DRAFT_WALL_COLOR = Color(0xFF2E7D32)
 private fun makePreviewSegment(start: PointMm, end: PointMm): WallSegment? =
     runCatching { PlanGeometry.segmentFromDrag(start, end) }.getOrNull()
 
-private enum class GestureMode { TAP, DRAW, PAN, PINCH }
+private enum class GestureMode { TAP, DRAW, MOVE_ENDPOINT, PAN, PINCH }
+
+private data class EndpointDragPreview(
+    val segmentIndex: Int,
+    val endpoint: WallEndpoint,
+    val origin: PointMm,
+    val destination: PointMm
+)
 
 private data class MagnifierState(
     val finger: Offset,

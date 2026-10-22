@@ -65,6 +65,110 @@ class PlanGeometryTest {
     }
 
     @Test
+    fun movingOneEndpointUpdatesLengthAndAngleWithoutMovingOtherWalls() {
+        val first = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+        val second = PlanGeometry.appendSegment(first, 90.0, 1_000)
+        val destination = PointMm(1_200.0, 300.0)
+
+        val updated = PlanGeometry.moveEndpoint(
+            existingSegments = second,
+            index = 0,
+            endpoint = WallEndpoint.END,
+            destination = destination
+        )
+
+        assertEquals(destination, updated[0].end)
+        assertEquals(1_237L, updated[0].lengthMm)
+        assertEquals(Math.toDegrees(kotlin.math.atan2(300.0, 1_200.0)), updated[0].angleDegrees, 0.001)
+        assertEquals(second[1], updated[1])
+    }
+
+    @Test
+    fun movingEndpointSnapsToAxisWithinEightDegrees() {
+        val segment = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+
+        val updated = PlanGeometry.moveEndpoint(
+            existingSegments = segment,
+            index = 0,
+            endpoint = WallEndpoint.END,
+            destination = PointMm(1_200.0, 100.0)
+        ).single()
+
+        assertEquals(PointMm(1_204.0, 0.0), updated.end)
+        assertEquals(0.0, updated.angleDegrees, 0.0)
+    }
+
+    @Test
+    fun movingStartEndpointAlsoSnapsRelativeToTheFixedEnd() {
+        val segment = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+
+        val updated = PlanGeometry.moveEndpoint(
+            existingSegments = segment,
+            index = 0,
+            endpoint = WallEndpoint.START,
+            destination = PointMm(-200.0, 30.0)
+        ).single()
+
+        assertEquals(PointMm(-200.0, 0.0), updated.start)
+        assertEquals(0.0, updated.angleDegrees, 0.0)
+    }
+
+    @Test
+    fun movingEndpointOutsideEightDegreeToleranceKeepsFreeAngle() {
+        val segment = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+        val destination = PointMm(1_200.0, 250.0)
+
+        val updated = PlanGeometry.moveEndpoint(
+            existingSegments = segment,
+            index = 0,
+            endpoint = WallEndpoint.END,
+            destination = destination
+        ).single()
+
+        assertEquals(destination, updated.end)
+        assertEquals(Math.toDegrees(kotlin.math.atan2(250.0, 1_200.0)), updated.angleDegrees, 0.001)
+    }
+
+    @Test
+    fun movingWholeJunctionMovesEveryExactlyConnectedEndpoint() {
+        val first = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+        val second = PlanGeometry.appendSegment(first, 90.0, 1_000)
+        val third = PlanGeometry.appendSegment(
+            second,
+            angleDegrees = 180.0,
+            lengthMm = 500,
+            startPoint = second[1].end
+        )
+        val junction = second[1].end
+        val destination = PointMm(1_030.0, 2_100.0)
+        val snappedDestination = PointMm(1_000.0, 2_100.0)
+
+        assertEquals(2, PlanGeometry.endpointUseCount(third, junction))
+        val updated = PlanGeometry.moveEndpoint(
+            existingSegments = third,
+            index = 1,
+            endpoint = WallEndpoint.END,
+            destination = destination,
+            moveConnectedEndpoints = true
+        )
+
+        assertEquals(snappedDestination, updated[1].end)
+        assertEquals(snappedDestination, updated[2].start)
+        assertEquals(third[0], updated[0])
+        assertEquals(third[1].start, updated[1].start)
+        assertEquals(third[2].end, updated[2].end)
+    }
+
+    @Test
+    fun movingEndpointCannotCollapseWallToZeroLength() {
+        val segment = PlanGeometry.appendSegment(emptyList(), 0.0, 1_000)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            PlanGeometry.moveEndpoint(segment, 0, WallEndpoint.END, segment.single().start)
+        }
+    }
+
+    @Test
     fun rejectsZeroOrNegativeWallLength() {
         assertThrows(IllegalArgumentException::class.java) {
             PlanGeometry.appendSegment(emptyList(), 0.0, 0)
