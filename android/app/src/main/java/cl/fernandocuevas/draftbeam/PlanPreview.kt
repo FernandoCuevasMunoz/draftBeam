@@ -4,14 +4,19 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -25,6 +30,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -52,6 +58,7 @@ fun PlanPreview(
     selectedSegmentIndex: Int?,
     selectedNoteIndex: Int? = null,
     pendingNotePlacement: Boolean = false,
+    snapOptions: DraftSnapOptions = DraftSnapOptions(),
     selectedStartPoint: PointMm?,
     selectedAngleDegrees: Double,
     viewport: PlanViewportState,
@@ -66,6 +73,7 @@ fun PlanPreview(
     modifier: Modifier = Modifier
 ) {
     val draftSegment = remember { mutableStateOf<WallSegment?>(null) }
+    val draftSnapPreview = remember { mutableStateOf<DraftSnapResult?>(null) }
     val endpointDragPreview = remember { mutableStateOf<EndpointDragPreview?>(null) }
     val magnifier = remember { mutableStateOf<MagnifierState?>(null) }
     val centerCoordinate = viewport.centerPoint
@@ -77,11 +85,12 @@ fun PlanPreview(
         modifier = Modifier.matchParentSize()
             .background(canvasBackground)
             .onSizeChanged { viewport.updateCanvasSize(it, segments, notes) }
-            .pointerInput(segments, notes, selectedSegmentIndex, selectedNoteIndex, pendingNotePlacement, selectedStartPoint, viewport) {
+            .pointerInput(segments, notes, selectedSegmentIndex, selectedNoteIndex, pendingNotePlacement, selectedStartPoint, snapOptions, viewport) {
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = true)
                     val size = this.size
                     val endpointSnapTolerancePx = ENDPOINT_SNAP_TOLERANCE_DP.dp.toPx()
+                    val acquiredTrackingAnchors = mutableListOf<PointMm>()
                     val noteIndex = if (pendingNotePlacement) null else findNoteAt(
                         notes, down.position, size, viewport, density = 1.dp.toPx()
                     )
@@ -110,6 +119,25 @@ fun PlanPreview(
                     var previousPinchDistance = 0f
                     var pinchInitialized = false
                     var pressed = true
+
+                    fun resolveDraftAt(position: Offset, source: PointMm): DraftSnapResult {
+                        val pixelsPerMillimeter = viewport.pixelsPerMillimeter.coerceAtLeast(0.0001f)
+                        val snap = PlanGeometry.resolveDraftSnap(
+                            start = source,
+                            cursor = viewport.unproject(position, size),
+                            segments = segments,
+                            options = snapOptions,
+                            acquiredAnchors = acquiredTrackingAnchors,
+                            toleranceMm = (endpointSnapTolerancePx / pixelsPerMillimeter).toDouble()
+                        )
+                        snap.capturedAnchor?.let { anchor ->
+                            if (anchor !in acquiredTrackingAnchors) {
+                                acquiredTrackingAnchors += anchor
+                                if (acquiredTrackingAnchors.size > 8) acquiredTrackingAnchors.removeAt(0)
+                            }
+                        }
+                        return snap
+                    }
 
                     while (pressed) {
                         val event = awaitPointerEvent()
@@ -159,12 +187,16 @@ fun PlanPreview(
                                     )
                                 } else {
                                     mode = GestureMode.DRAW
-                                    val worldEnd = viewport.unproject(currentPosition, size)
-                                    draftSegment.value = makePreviewSegment(endpoint, worldEnd)
-                                    magnifier.value = findNearbyEndpoint(
-                                        segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
+                                    val snap = resolveDraftAt(currentPosition, endpoint)
+                                    draftSnapPreview.value = snap
+                                    draftSegment.value = makePreviewSegment(
+                                        endpoint,
+                                        snap.point
                                     )
-                                        ?.let { MagnifierState(currentPosition, worldEnd, it) }
+                                    magnifier.value = findNearbyEndpoint(
+                                        segments, endpoint, snap.point, size, viewport, endpointSnapTolerancePx
+                                    )
+                                        ?.let { MagnifierState(currentPosition, snap.point, it) }
                                 }
                                 change.consume()
                             }
@@ -178,12 +210,17 @@ fun PlanPreview(
                                 change.consume()
                             }
                             mode == GestureMode.DRAW -> {
-                                val worldEnd = viewport.unproject(currentPosition, size)
-                                draftSegment.value = makePreviewSegment(endpoint!!, worldEnd)
-                                magnifier.value = findNearbyEndpoint(
-                                    segments, endpoint, worldEnd, size, viewport, endpointSnapTolerancePx
+                                val source = endpoint!!
+                                val snap = resolveDraftAt(currentPosition, source)
+                                draftSnapPreview.value = snap
+                                draftSegment.value = makePreviewSegment(
+                                    source,
+                                    snap.point
                                 )
-                                    ?.let { MagnifierState(currentPosition, worldEnd, it) }
+                                magnifier.value = findNearbyEndpoint(
+                                    segments, source, snap.point, size, viewport, endpointSnapTolerancePx
+                                )
+                                    ?.let { MagnifierState(currentPosition, snap.point, it) }
                                 change.consume()
                             }
                             mode == GestureMode.MOVE_ENDPOINT -> {
@@ -225,7 +262,9 @@ fun PlanPreview(
                                 GestureMode.DRAW -> {
                                     draftSegment.value = null
                                     magnifier.value = null
-                                    val drawnEnd = viewport.unproject(currentPosition, size)
+                                    val snap = resolveDraftAt(currentPosition, endpoint!!)
+                                    draftSnapPreview.value = snap
+                                    val drawnEnd = snap.point
                                     val nearbyEndpoint = findNearbyEndpoint(
                                         segments = segments,
                                         startPoint = endpoint!!,
@@ -259,6 +298,7 @@ fun PlanPreview(
                     }
 
                     draftSegment.value = null
+                    draftSnapPreview.value = null
                     endpointDragPreview.value = null
                     magnifier.value = null
                 }
@@ -451,7 +491,7 @@ fun PlanPreview(
             )
         }
 
-        val availableEndpoints = PlanGeometry.wallInteractionPoints(renderSegments)
+        val availableEndpoints = visibleWallInteractionPoints(renderSegments, selectedSegmentIndex)
         availableEndpoints.forEach { endpoint ->
             val point = viewport.project(endpoint, size)
             drawCircle(canvasBackground, 8.dp.toPx(), point)
@@ -496,9 +536,34 @@ fun PlanPreview(
                 note = note,
                 selected = selectedNoteIndex == index,
                 anchor = viewport.project(note.position, size),
-                pixelsPerMillimeter = viewport.pixelsPerMillimeter,
-                density = 1.dp.toPx()
+                pixelsPerMillimeter = viewport.pixelsPerMillimeter
             )
+        }
+
+        draftSnapPreview.value?.guides?.distinct()?.forEach { guide ->
+            val angle = Math.toRadians(guide.angleDegrees)
+            val halfSpanMm = hypot(size.width.toFloat(), size.height.toFloat()) /
+                viewport.pixelsPerMillimeter.coerceAtLeast(0.0001f)
+            val first = PointMm(
+                guide.anchor.x - kotlin.math.cos(angle) * halfSpanMm,
+                guide.anchor.y - kotlin.math.sin(angle) * halfSpanMm
+            )
+            val second = PointMm(
+                guide.anchor.x + kotlin.math.cos(angle) * halfSpanMm,
+                guide.anchor.y + kotlin.math.sin(angle) * halfSpanMm
+            )
+            drawLine(
+                color = DraftBeamColors.LaserCyan.copy(alpha = 0.85f),
+                start = viewport.project(first, size),
+                end = viewport.project(second, size),
+                strokeWidth = 1.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 5.dp.toPx()))
+            )
+        }
+        draftSnapPreview.value?.target?.let { target ->
+            val targetOnScreen = viewport.project(target, size)
+            drawCircle(DraftBeamColors.LaserCyan, 7.dp.toPx(), targetOnScreen, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+            drawCircle(DraftBeamColors.LaserCyan, 2.dp.toPx(), targetOnScreen)
         }
 
         draftSegment.value?.let { draft ->
@@ -580,7 +645,7 @@ fun PlanPreview(
             drawLine(WALL_COLOR, Offset(lensCenter.x, lensCenter.y - 8.dp.toPx()), Offset(lensCenter.x, lensCenter.y + 8.dp.toPx()), 1.dp.toPx())
         }
         nativeCanvas.restoreToCount(clipSave)
-    }
+        }
         DirectionEdgeButton(
             direction = WallDirection.X_NEGATIVE,
             selectedAngleDegrees = selectedAngleDegrees,
@@ -609,6 +674,59 @@ fun PlanPreview(
             modifier = Modifier.align(Alignment.BottomCenter).padding(top = 4.dp, bottom = 12.dp),
             canvasBackground = canvasBackground
         )
+    }
+}
+
+@Composable
+internal fun SnapControlPanel(
+    options: DraftSnapOptions,
+    onOptionsChange: (DraftSnapOptions) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        color = DraftBeamColors.PanelBackground.copy(alpha = 0.94f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, DraftBeamColors.TechnicalBlue.copy(alpha = 0.85f))
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("Ayudas al dibujar", style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+            SnapOptionRow(
+                title = "Guías desde extremos",
+                description = "Línea discontinua al alinear con un extremo existente.",
+                checked = options.endpointTrackingEnabled,
+                onCheckedChange = { onOptionsChange(options.copy(endpointTrackingEnabled = it)) }
+            )
+            SnapOptionRow(
+                title = "Imán a extremos",
+                description = "Ajusta el final del muro al extremo cercano.",
+                checked = options.endpointMagnetEnabled,
+                onCheckedChange = { onOptionsChange(options.copy(endpointMagnetEnabled = it)) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SnapOptionRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = androidx.compose.material3.MaterialTheme.typography.labelLarge)
+            Text(
+                description,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                color = DraftBeamColors.TextSecondary
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -651,8 +769,13 @@ private val WALL_COLOR = Color(0xFF3478F6)
 private val WALL_ORANGE = Color(0xFFE65100)
 private val DRAFT_WALL_COLOR = Color(0xFF2E7D32)
 
-private fun makePreviewSegment(start: PointMm, end: PointMm): WallSegment? =
-    runCatching { PlanGeometry.segmentFromDrag(start, end) }.getOrNull()
+private fun makePreviewSegment(
+    start: PointMm,
+    end: PointMm,
+    snapToleranceDegrees: Double = PlanGeometry.DEFAULT_SNAP_TOLERANCE_DEGREES
+): WallSegment? = runCatching {
+    PlanGeometry.segmentFromDrag(start, end, snapToleranceDegrees)
+}.getOrNull()
 
 private enum class GestureMode { TAP, DRAW, MOVE_ENDPOINT, PAN, PINCH }
 
@@ -889,17 +1012,16 @@ private fun drawPlanNote(
     note: PlanNote,
     selected: Boolean,
     anchor: Offset,
-    pixelsPerMillimeter: Float,
-    density: Float
+    pixelsPerMillimeter: Float
 ) {
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = (if (selected) WALL_ORANGE else Color(0xFF61D5FF)).toArgb()
-        textSize = noteFontSize(note, pixelsPerMillimeter, density)
+        textSize = noteFontSize(note, pixelsPerMillimeter)
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         textAlign = Paint.Align.LEFT
     }
     val metrics = paint.fontMetrics
-    val padding = 5f * density
+    val padding = (paint.textSize * 0.12f).coerceAtLeast(0.5f)
     val bounds = RectF(
         anchor.x - padding,
         anchor.y + metrics.ascent - padding,
@@ -910,18 +1032,26 @@ private fun drawPlanNote(
     val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = paint.color
         style = Paint.Style.STROKE
-        strokeWidth = if (selected) 2f * density else 1f * density
+        strokeWidth = (paint.textSize * if (selected) 0.045f else 0.025f).coerceAtLeast(0.35f)
     }
     canvas.save()
     canvas.rotate(-note.rotationDegrees.toFloat(), anchor.x, anchor.y)
-    canvas.drawRoundRect(bounds, 4f * density, 4f * density, background)
-    canvas.drawRoundRect(bounds, 4f * density, 4f * density, outline)
+    canvas.drawRoundRect(bounds, paint.textSize * 0.08f, paint.textSize * 0.08f, background)
+    canvas.drawRoundRect(bounds, paint.textSize * 0.08f, paint.textSize * 0.08f, outline)
     canvas.drawText(note.text, anchor.x, anchor.y, paint)
     canvas.restore()
 }
 
-private fun noteFontSize(note: PlanNote, pixelsPerMillimeter: Float, density: Float): Float =
-    (note.heightMm.toFloat() * pixelsPerMillimeter).coerceIn(14f * density, 48f * density)
+internal fun noteFontSize(note: PlanNote, pixelsPerMillimeter: Float): Float =
+    (note.heightMm.toFloat() * pixelsPerMillimeter).coerceAtLeast(0.5f)
+
+internal fun visibleWallInteractionPoints(
+    segments: List<WallSegment>,
+    selectedSegmentIndex: Int?
+): List<PointMm> = selectedSegmentIndex
+    ?.let(segments::getOrNull)
+    ?.let { PlanGeometry.wallInteractionPoints(listOf(it)) }
+    .orEmpty()
 
 internal fun findNoteAt(
     notes: List<PlanNote>,
@@ -932,7 +1062,7 @@ internal fun findNoteAt(
 ): Int? {
     return notes.mapIndexedNotNull { index, note ->
         val anchor = viewport.project(note.position, canvasSize)
-        val fontSize = noteFontSize(note, viewport.pixelsPerMillimeter, density)
+        val fontSize = noteFontSize(note, viewport.pixelsPerMillimeter)
         val dx = tap.x - anchor.x
         val dy = tap.y - anchor.y
         val radians = Math.toRadians(note.rotationDegrees)

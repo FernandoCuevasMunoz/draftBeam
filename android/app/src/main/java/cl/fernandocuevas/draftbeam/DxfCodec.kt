@@ -149,6 +149,7 @@ object DxfCodec {
         pair(74, "1")
         pair(77, "0")
         pair(78, "1")
+        pair(271, DIMENSION_DECIMALS.toString()) // linear precision: whole millimeters
         pair(0, "ENDTAB")
         pair(0, "TABLE")
         pair(2, "BLOCK_RECORD")
@@ -623,6 +624,7 @@ object DxfCodec {
         pair(11, number(geometry.midpoint.x))
         pair(21, number(geometry.midpoint.y))
         pair(31, "0")
+        pair(1, String.format(Locale.US, "%.0f", geometry.length))
         pair(70, "33") // aligned dimension with an anonymous display block
         pair(3, "Standard")
         pair(100, "AcDbAlignedDimension")
@@ -679,18 +681,11 @@ object DxfCodec {
         appendBlockLine(extensionEnd, extensionEndBeyond)
 
         val text = String.format(Locale.US, "%.${DIMENSION_DECIMALS}f", geometry.length)
-        val textHalfWidth = text.length * DIMENSION_TEXT_HEIGHT_MM * DIMENSION_TEXT_WIDTH_FACTOR / 2.0
-        val gapOnAxis = textHalfWidth + DIMENSION_TEXT_GAP_MM
-        val textHalfPoint = PointMm(
-            geometry.midpoint.x - geometry.unitX * gapOnAxis,
-            geometry.midpoint.y - geometry.unitY * gapOnAxis
+        val textPosition = PointMm(
+            geometry.midpoint.x + geometry.normalX * offsetDirection * (DIMENSION_TEXT_HEIGHT_MM / 2.0 + DIMENSION_TEXT_LINE_GAP_MM),
+            geometry.midpoint.y + geometry.normalY * offsetDirection * (DIMENSION_TEXT_HEIGHT_MM / 2.0 + DIMENSION_TEXT_LINE_GAP_MM)
         )
-        val textHalfPointEnd = PointMm(
-            geometry.midpoint.x + geometry.unitX * gapOnAxis,
-            geometry.midpoint.y + geometry.unitY * gapOnAxis
-        )
-        appendBlockLine(geometry.lineStart, textHalfPoint)
-        appendBlockLine(textHalfPointEnd, geometry.lineEnd)
+        appendBlockLine(geometry.lineStart, geometry.lineEnd)
         appendDimensionArrow(geometry.lineStart, geometry.unitX, geometry.unitY, geometry.normalX, geometry.normalY)
         appendDimensionArrow(geometry.lineEnd, -geometry.unitX, -geometry.unitY, geometry.normalX, geometry.normalY)
 
@@ -700,12 +695,12 @@ object DxfCodec {
         pair(6, "BYBLOCK")
         pair(62, "0")
         pair(100, "AcDbMText")
-        pair(10, number(geometry.midpoint.x))
-        pair(20, number(geometry.midpoint.y))
+        pair(10, number(textPosition.x))
+        pair(20, number(textPosition.y))
         pair(30, "0")
         pair(40, number(DIMENSION_TEXT_HEIGHT_MM))
         pair(41, number(text.length * DIMENSION_TEXT_HEIGHT_MM * DIMENSION_TEXT_WIDTH_FACTOR))
-        pair(71, "5") // centered, middle attachment
+        pair(71, "5") // centered, middle attachment; offset next to the dimension line
         pair(72, "1")
         pair(1, text)
         pair(7, DIMENSION_TEXT_STYLE)
@@ -811,6 +806,7 @@ object DxfCodec {
     private const val DIMENSION_TEXT_HEIGHT_MM = 100.0
     private const val DIMENSION_ARROW_SIZE_MM = 50.0
     private const val DIMENSION_TEXT_GAP_MM = 50.0
+    private const val DIMENSION_TEXT_LINE_GAP_MM = 10.0
     private const val DIMENSION_EXTENSION_OFFSET_MM = 50.0
     private const val DIMENSION_EXTENSION_OVERSHOOT_MM = 100.0
     private const val HATCH_SCALE = 5.0

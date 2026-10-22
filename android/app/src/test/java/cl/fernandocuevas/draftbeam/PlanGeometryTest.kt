@@ -188,6 +188,70 @@ class PlanGeometryTest {
     }
 
     @Test
+    fun objectSnapCapturesNearbyEndpointExactly() {
+        val wall = PlanGeometry.appendSegment(emptyList(), angleDegrees = 0.0, lengthMm = 1_000).single()
+
+        val result = PlanGeometry.resolveDraftSnap(
+            start = PointMm(0.0, 0.0),
+            cursor = PointMm(1_020.0, 10.0),
+            segments = listOf(wall),
+            options = DraftSnapOptions(),
+            acquiredAnchors = emptyList(),
+            toleranceMm = 40.0
+        )
+
+        assertEquals(DraftSnapType.ENDPOINT, result.type)
+        assertEquals(wall.end, result.point)
+        assertEquals(wall.end, result.capturedAnchor)
+    }
+
+    @Test
+    fun objectSnapTrackingProjectsCursorToAnAcquiredHorizontalGuide() {
+        val anchor = PointMm(800.0, 500.0)
+
+        val result = PlanGeometry.resolveDraftSnap(
+            start = PointMm(0.0, 0.0),
+            cursor = PointMm(300.0, 512.0),
+            segments = emptyList(),
+            options = DraftSnapOptions(),
+            acquiredAnchors = listOf(anchor),
+            toleranceMm = 20.0
+        )
+
+        assertEquals(DraftSnapType.TRACKING, result.type)
+        assertEquals(PointMm(300.0, 500.0), result.point)
+        assertTrue(result.guides.contains(DraftSnapGuide(anchor, 0.0)))
+    }
+
+    @Test
+    fun endpointTrackingAndEndpointMagnetCanBeControlledIndependently() {
+        val wall = PlanGeometry.appendSegment(emptyList(), angleDegrees = 0.0, lengthMm = 1_000).single()
+        val cursor = PointMm(1_020.0, 10.0)
+
+        val guideOnly = PlanGeometry.resolveDraftSnap(
+            start = PointMm(0.0, 0.0),
+            cursor = cursor,
+            segments = listOf(wall),
+            options = DraftSnapOptions(endpointMagnetEnabled = false),
+            acquiredAnchors = emptyList(),
+            toleranceMm = 40.0
+        )
+        val magnetOnly = PlanGeometry.resolveDraftSnap(
+            start = PointMm(0.0, 0.0),
+            cursor = cursor,
+            segments = listOf(wall),
+            options = DraftSnapOptions(endpointTrackingEnabled = false),
+            acquiredAnchors = emptyList(),
+            toleranceMm = 40.0
+        )
+
+        assertEquals(PointMm(cursor.x, wall.end.y), guideOnly.point)
+        assertTrue(guideOnly.guides.contains(DraftSnapGuide(wall.end, 0.0)))
+        assertEquals(wall.end, magnetOnly.point)
+        assertEquals(emptyList<DraftSnapGuide>(), magnetOnly.guides)
+    }
+
+    @Test
     fun rejectsZeroOrNegativeWallLength() {
         assertThrows(IllegalArgumentException::class.java) {
             PlanGeometry.appendSegment(emptyList(), 0.0, 0)
