@@ -14,7 +14,7 @@ Route: inline ODD tasks on `feature/wall-interactions`; update this file and its
 - T3 [S3] inline: done; notes support typed entry, tap-to-place, selection, edit, delete, undo, DXF TEXT round-trip and note-aware fit-to-content. Core/domain commit `6fa994a`, canvas commit `715d0cd`, Activity commit `5ea309d`. Focused codec, unit, hit-test and fit-to-content tests passed.
 - T4 [S3-S4] inline: done; canvas note drawing, hit testing and note-aware fit committed in `715d0cd`; optional callback defaults preserve existing `PlanPreview` callers.
 - T5 [S1-S3] inline: done; Activity toolbar, wall/note workflows and user documentation committed in `5ea309d`.
-- T6 [S1-S4] inline: in progress; record final commit hashes and integrated verification in this file and Engram; commit TBD.
+- T6 [S1-S4] inline: done; final source hashes, integrated checks, diff check, and device-test limitation recorded in this file and Engram; evidence commit `e0e185e`.
 
 ## Log
 - L1. User request: "en los botones de la barra inferior, añade el siguiente orden de botones,\n1.- nueva linea\n2.- editar (se habilita si se selecciona un linea)\n3.- eliminar  (se habilita si se selecciona un linea)\n4.- ancho  (se habilita si se selecciona un linea)\n5.- agregar nota"
