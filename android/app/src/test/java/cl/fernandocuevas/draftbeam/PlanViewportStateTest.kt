@@ -108,6 +108,26 @@ class PlanViewportStateTest {
     }
 
     @Test
+    fun fittingOnlyNotesKeepsTheirTextBoundsVisible() {
+        val viewport = createViewport()
+        val note = PlanNote("Far room label", PointMm(25_000.0, -12_000.0), heightMm = 100.0)
+        val textWidthMm = note.text.length * note.heightMm * 0.62
+        val points = listOf(
+            note.position,
+            PointMm(note.position.x + textWidthMm, note.position.y),
+            PointMm(note.position.x + textWidthMm, note.position.y + note.heightMm)
+        )
+
+        viewport.fitToContent(emptyList(), listOf(note))
+
+        points.forEach { point ->
+            val projected = viewport.project(point, canvasSize)
+            assertTrue(projected.x in 0f..canvasSize.width.toFloat())
+            assertTrue(projected.y in 0f..canvasSize.height.toFloat())
+        }
+    }
+
+    @Test
     fun fittingOneHorizontalWallUsesNearlyTheFullCanvasWidth() {
         val viewport = createViewport()
         val wall = WallSegment(PointMm(0.0, 0.0), PointMm(6_000.0, 0.0), 6_000, 0.0)

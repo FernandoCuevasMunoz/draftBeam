@@ -50,6 +50,23 @@ data class WallSegment(
     val growthSide: WallGrowthSide = WallGrowthSide.LEFT
 )
 
+data class PlanNote(
+    val text: String,
+    val position: PointMm,
+    val heightMm: Double = 100.0,
+    val rotationDegrees: Double = 0.0
+) {
+    val textWidthMm: Double get() = text.length * heightMm * 0.62
+
+    init {
+        require(text.isNotBlank()) { "La nota no puede estar vacía." }
+        require(text.length <= 255 && '\n' !in text && '\r' !in text) { "La nota debe tener hasta 255 caracteres en una sola línea." }
+        require(position.x.isFinite() && position.y.isFinite()) { "La posición de la nota no es válida." }
+        require(heightMm.isFinite() && heightMm > 0.0) { "El tamaño de texto de la nota debe ser mayor que cero." }
+        require(rotationDegrees.isFinite()) { "La rotación de la nota no es válida." }
+    }
+}
+
 enum class WallEndpoint {
     START,
     END
@@ -57,6 +74,22 @@ enum class WallEndpoint {
 
 object PlanGeometry {
     private val origin = PointMm(0.0, 0.0)
+
+    fun createWall(
+        existingSegments: List<WallSegment>,
+        angleDegrees: Double,
+        lengthMm: Long,
+        startPoint: PointMm?,
+        widthMm: Long,
+        growthSide: WallGrowthSide
+    ): WallSegment {
+        require(widthMm >= 0) { "El ancho del muro no puede ser negativo." }
+        val start = startPoint ?: existingSegments.lastOrNull()?.end ?: origin
+        return segmentFromLength(start, normalizeAngle(angleDegrees), lengthMm).copy(
+            widthMm = widthMm,
+            growthSide = growthSide
+        )
+    }
 
     fun appendSegment(
         existingSegments: List<WallSegment>,
@@ -185,6 +218,12 @@ object PlanGeometry {
             PointMm(segment.start.x + offsetX, segment.start.y + offsetY)
         )
     }
+
+    /** Endpoints available for continuation, including the parallel edge of each wall. */
+    fun wallInteractionPoints(segments: List<WallSegment>): List<PointMm> =
+        segments.flatMap { segment ->
+            listOf(segment.start, segment.end) + wallCorners(segment)
+        }.distinct()
 
     /**
      * Calculates visible wall footprints. At a shared endpoint, the wider wall is

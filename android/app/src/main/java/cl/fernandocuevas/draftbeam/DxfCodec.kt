@@ -9,6 +9,7 @@ import kotlin.math.roundToLong
 
 data class DxfImportResult(
     val segments: List<WallSegment>,
+    val notes: List<PlanNote>,
     val warnings: List<String>
 )
 
@@ -19,7 +20,7 @@ object DxfCodec {
     private const val AXIS_LAYER_PREFIX = "FDXL_AXIS_"
     private const val WALL_LAYER_PREFIX = "FDXL_WALL_"
 
-    fun encode(segments: List<WallSegment>): String = buildString {
+    fun encode(segments: List<WallSegment>, notes: List<PlanNote> = emptyList()): String = buildString {
         val dimensions = segments.mapIndexedNotNull { index, segment ->
             dimensionGeometry(index, segment)
         }
@@ -27,6 +28,7 @@ object DxfCodec {
         val layers = buildList {
             add("0" to 7)
             if (dimensions.isNotEmpty()) add(DIMENSION_LAYER to 7)
+            if (notes.isNotEmpty()) add(NOTE_LAYER to 7)
             segments.forEachIndexed { index, segment ->
                 add(axisLayer(index) to 5) // ACI blue
                 if (segment.widthMm > 0L) add(wallLayer(index) to 30) // ACI orange
@@ -208,6 +210,19 @@ object DxfCodec {
             pair(31, "0")
         }
         dimensions.forEach { geometry -> appendAlignedDimension(geometry) }
+        notes.forEach { note ->
+            pair(0, "TEXT")
+            pair(100, "AcDbEntity")
+            pair(8, NOTE_LAYER)
+            pair(100, "AcDbText")
+            pair(10, number(note.position.x))
+            pair(20, number(note.position.y))
+            pair(30, "0")
+            pair(40, number(note.heightMm))
+            pair(1, note.text)
+            pair(50, number(note.rotationDegrees))
+            pair(7, "Standard")
+        }
         pair(0, "ENDSEC")
         pair(0, "EOF")
     }
@@ -240,11 +255,13 @@ object DxfCodec {
                     if (id == null) genericEntities += entity
                     else outlinesById.getOrPut(id) { mutableListOf() }.add(entity)
                 }
+                is DxfText -> genericEntities += entity
                 is DxfUnsupported -> if (!isAppGeneratedLayer(entity.layer)) ignored++
             }
         }
 
         val result = mutableListOf<WallSegment>()
+        val notes = mutableListOf<PlanNote>()
         axesById.toSortedMap().forEach { (id, axis) ->
             val line = toMillimeterLine(axis, unitScale) ?: run {
                 ignored++
@@ -274,6 +291,21 @@ object DxfCodec {
                         }
                     }
                 }
+                is DxfText -> {
+                    val position = entity.position.scale(unitScale)
+                    val heightMm = entity.heightMm * unitScale
+                    val isInRange = abs(position.x) <= MAX_COORDINATE_MM && abs(position.y) <= MAX_COORDINATE_MM &&
+                        heightMm <= MAX_COORDINATE_MM
+                    if (!isInRange) {
+                        ignored++
+                    } else {
+                        try {
+                            notes += PlanNote(entity.text, position, heightMm, entity.rotationDegrees)
+                        } catch (_: IllegalArgumentException) {
+                            ignored++
+                        }
+                    }
+                }
                 is DxfUnsupported -> if (!isAppGeneratedLayer(entity.layer)) ignored++
             }
         }
@@ -287,7 +319,7 @@ object DxfCodec {
                 add("El DXF no declara unidades; se interpretaron las coordenadas como milímetros.")
             }
         }
-        return DxfImportResult(result, warnings)
+        return DxfImportResult(result, notes, warnings)
     }
 
     private fun parsePairs(contents: String): List<DxfPair> {
@@ -350,6 +382,12 @@ object DxfCodec {
                     entities += if (type == "LINE") parseLine(fields) else parseLwPolyline(fields)
                     index = end
                 }
+                "TEXT" -> {
+                    val end = nextEntityIndex(pairs, index)
+                    val fields = pairs.subList(index, end)
+                    entities += parseText(fields)
+                    index = end
+                }
                 "POLYLINE" -> {
                     val headerEnd = nextEntityIndex(pairs, index)
                     val header = pairs.subList(index, headerEnd)
@@ -388,6 +426,19 @@ object DxfCodec {
         var index = from
         while (index < pairs.size && pairs[index].code != 0) index++
         return index
+    }
+
+    private fun parseText(fields: List<DxfPair>): DxfText {
+        val layer = fields.firstOrNull { it.code == 8 }?.value ?: "0"
+        val text = fields.firstOrNull { it.code == 1 }?.value
+            ?: throw IllegalArgumentException("Falta el contenido de una entidad de texto DXF.")
+        return DxfText(
+            layer = layer,
+            text = text,
+            position = PointMm(fields.number(10), fields.number(20)),
+            heightMm = fields.numberOrNull(40) ?: 100.0,
+            rotationDegrees = fields.numberOrNull(50) ?: 0.0
+        )
     }
 
     private fun parseLine(fields: List<DxfPair>): DxfLine {
@@ -740,6 +791,13 @@ object DxfCodec {
     )
     private sealed interface DxfEntity
     private data class DxfLine(val layer: String, val start: PointMm, val end: PointMm, val nonPlanar: Boolean) : DxfEntity
+    private data class DxfText(
+        val layer: String,
+        val text: String,
+        val position: PointMm,
+        val heightMm: Double,
+        val rotationDegrees: Double
+    ) : DxfEntity
     private data class DxfPolyline(
         val layer: String,
         val points: List<PointMm>,
@@ -757,6 +815,7 @@ object DxfCodec {
     private const val DIMENSION_EXTENSION_OVERSHOOT_MM = 100.0
     private const val HATCH_SCALE = 5.0
     private const val DIMENSION_LAYER = "FDXL_DIMS"
+    private const val NOTE_LAYER = "FDXL_NOTES"
     private const val DIMENSION_OFFSET_MM = 300.0
     private const val DIMENSION_DECIMALS = 0
     private const val DIMENSION_TEXT_WIDTH_FACTOR = 0.68

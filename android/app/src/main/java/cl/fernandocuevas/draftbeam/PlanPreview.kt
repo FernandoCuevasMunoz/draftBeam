@@ -1,6 +1,7 @@
 package cl.fernandocuevas.draftbeam
 
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -47,12 +48,17 @@ import kotlin.random.Random
 @Composable
 fun PlanPreview(
     segments: List<WallSegment>,
+    notes: List<PlanNote> = emptyList(),
     selectedSegmentIndex: Int?,
+    selectedNoteIndex: Int? = null,
+    pendingNotePlacement: Boolean = false,
     selectedStartPoint: PointMm?,
     selectedAngleDegrees: Double,
     viewport: PlanViewportState,
     onDirectionSelected: (WallDirection) -> Unit,
     onSegmentSelected: (Int?) -> Unit,
+    onNoteSelected: (Int?) -> Unit = {},
+    onNotePlaced: (PointMm) -> Unit = {},
     onStartPointSelected: (PointMm) -> Unit,
     onFingerDrawn: (PointMm, PointMm) -> Unit,
     onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
@@ -70,13 +76,16 @@ fun PlanPreview(
       Canvas(
         modifier = Modifier.matchParentSize()
             .background(canvasBackground)
-            .onSizeChanged { viewport.updateCanvasSize(it, segments) }
-            .pointerInput(segments, selectedSegmentIndex, selectedStartPoint, viewport) {
+            .onSizeChanged { viewport.updateCanvasSize(it, segments, notes) }
+            .pointerInput(segments, notes, selectedSegmentIndex, selectedNoteIndex, pendingNotePlacement, selectedStartPoint, viewport) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val size = this.size
                     val endpointSnapTolerancePx = ENDPOINT_SNAP_TOLERANCE_DP.dp.toPx()
-                    val selectedEndpoint = selectedSegmentIndex
+                    val noteIndex = if (pendingNotePlacement) null else findNoteAt(
+                        notes, down.position, size, viewport, density = 1.dp.toPx()
+                    )
+                    val selectedEndpoint = if (pendingNotePlacement || noteIndex != null) null else selectedSegmentIndex
                         ?.let { index ->
                             segments.getOrNull(index)?.let { segment ->
                                 listOf(WallEndpoint.START to segment.start, WallEndpoint.END to segment.end)
@@ -88,14 +97,13 @@ fun PlanPreview(
                                     ?.let { (kind, pointAndDistance) -> Triple(index, kind, pointAndDistance.first) }
                             }
                         }
-                    val endpoint = selectedEndpoint?.third ?: findEndpointAt(
+                    val endpoint = if (pendingNotePlacement || noteIndex != null) null else selectedEndpoint?.third ?: findEndpointAt(
                         segments, down.position, size, viewport, 34.dp.toPx()
                     )
-                    val segmentIndex = if (endpoint == null) {
-                        findSegmentAt(segments, down.position, size, viewport, 24.dp.toPx())
-                    } else {
-                        null
-                    }
+                    val segmentHit = if (pendingNotePlacement || noteIndex != null) null else findSegmentAt(
+                        segments, down.position, size, viewport, 24.dp.toPx()
+                    )
+                    val segmentIndex = if (endpoint == null) segmentHit?.index else null
                     var mode = GestureMode.TAP
                     var lastPosition = down.position
                     var previousPinchCentroid = Offset.Zero
@@ -191,9 +199,21 @@ fun PlanPreview(
                             pressed = false
                             when (mode) {
                                 GestureMode.TAP -> {
-                                    if (endpoint != null) {
+                                    if (pendingNotePlacement) {
+                                        onNotePlaced(viewport.unproject(down.position, size))
+                                    } else if (noteIndex != null) {
+                                        onNoteSelected(noteIndex)
+                                    } else if (endpoint != null) {
                                         if (selectedEndpoint != null) {
                                             onSegmentSelected(selectedEndpoint.first)
+                                        } else if (
+                                            segmentHit != null && shouldSelectShortLineOnTap(
+                                                lineLengthPx = segmentHit.lineLengthPx,
+                                                nearestEndpointDistancePx = (down.position - viewport.project(endpoint, size)).getDistance(),
+                                                endpointTargetPx = 34.dp.toPx()
+                                            )
+                                        ) {
+                                            onSegmentSelected(segmentHit.index)
                                         } else {
                                             onSegmentSelected(null)
                                             onStartPointSelected(endpoint)
@@ -431,6 +451,14 @@ fun PlanPreview(
             )
         }
 
+        val availableEndpoints = PlanGeometry.wallInteractionPoints(renderSegments)
+        availableEndpoints.forEach { endpoint ->
+            val point = viewport.project(endpoint, size)
+            drawCircle(canvasBackground, 8.dp.toPx(), point)
+            drawCircle(Color(0xFF61D5FF), 6.dp.toPx(), point)
+            drawCircle(canvasBackground, 2.dp.toPx(), point)
+        }
+
         val activePoint = selectedStartPoint
             ?.let { point -> endpointDragPreview.value?.takeIf { it.origin == point }?.destination ?: point }
             ?: renderSegments.lastOrNull()?.end
@@ -461,6 +489,17 @@ fun PlanPreview(
         paint.textAlign = Paint.Align.CENTER
         nativeCanvas.drawText(centerLabel, center.x, labelTop + paint.textSize, paint)
         paint.textSize = 13.dp.toPx()
+
+        notes.forEachIndexed { index, note ->
+            drawPlanNote(
+                canvas = nativeCanvas,
+                note = note,
+                selected = selectedNoteIndex == index,
+                anchor = viewport.project(note.position, size),
+                pixelsPerMillimeter = viewport.pixelsPerMillimeter,
+                density = 1.dp.toPx()
+            )
+        }
 
         draftSegment.value?.let { draft ->
             val start = viewport.project(draft.start, size)
@@ -754,22 +793,42 @@ class PlanViewportState {
     private var canvasWidth = 0f
     private var canvasHeight = 0f
 
-    fun updateCanvasSize(size: IntSize, segments: List<WallSegment>) {
+    fun updateCanvasSize(size: IntSize, segments: List<WallSegment>, notes: List<PlanNote> = emptyList()) {
         canvasWidth = size.width.toFloat()
         canvasHeight = size.height.toFloat()
-        if (pixelsPerMillimeter <= 0f && canvasWidth > 0f && canvasHeight > 0f) fitToContent(segments)
+        if (pixelsPerMillimeter <= 0f && canvasWidth > 0f && canvasHeight > 0f) fitToContent(segments, notes)
     }
 
-    fun fitToContent(segments: List<WallSegment>) {
+    fun fitToContent(segments: List<WallSegment>, notes: List<PlanNote> = emptyList()) {
         if (canvasWidth <= 0f || canvasHeight <= 0f) return
 
-        val points = if (segments.isEmpty()) {
+        val segmentPoints = segments.flatMap { segment ->
+            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment)
+        }
+        val notePoints = notes.flatMap { note ->
+            val width = note.textWidthMm
+            val height = note.heightMm
+            val radians = Math.toRadians(note.rotationDegrees)
+            val cosine = kotlin.math.cos(radians)
+            val sine = kotlin.math.sin(radians)
             listOf(
+                PointMm(0.0, -height * NOTE_TEXT_DESCENT_FACTOR),
+                PointMm(width, -height * NOTE_TEXT_DESCENT_FACTOR),
+                PointMm(width, height),
+                PointMm(0.0, height)
+            ).map { local ->
+                PointMm(
+                    note.position.x + local.x * cosine - local.y * sine,
+                    note.position.y + local.x * sine + local.y * cosine
+                )
+            }
+        }
+        val points = when {
+            segmentPoints.isNotEmpty() || notePoints.isNotEmpty() -> segmentPoints + notePoints
+            else -> listOf(
                 PointMm(-DEFAULT_VIEW_HALF_SPAN_MM, -DEFAULT_VIEW_HALF_SPAN_MM),
                 PointMm(DEFAULT_VIEW_HALF_SPAN_MM, DEFAULT_VIEW_HALF_SPAN_MM)
             )
-        } else segments.flatMap { segment ->
-            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment)
         }
         val minX = points.minOf { it.x }
         val maxX = points.maxOf { it.x }
@@ -825,6 +884,68 @@ class PlanViewportState {
     }
 }
 
+private fun drawPlanNote(
+    canvas: android.graphics.Canvas,
+    note: PlanNote,
+    selected: Boolean,
+    anchor: Offset,
+    pixelsPerMillimeter: Float,
+    density: Float
+) {
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = (if (selected) WALL_ORANGE else Color(0xFF61D5FF)).toArgb()
+        textSize = noteFontSize(note, pixelsPerMillimeter, density)
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textAlign = Paint.Align.LEFT
+    }
+    val metrics = paint.fontMetrics
+    val padding = 5f * density
+    val bounds = RectF(
+        anchor.x - padding,
+        anchor.y + metrics.ascent - padding,
+        anchor.x + paint.measureText(note.text) + padding,
+        anchor.y + metrics.descent + padding
+    )
+    val background = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = DraftBeamColors.BackgroundDeep.copy(alpha = 0.92f).toArgb() }
+    val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = paint.color
+        style = Paint.Style.STROKE
+        strokeWidth = if (selected) 2f * density else 1f * density
+    }
+    canvas.save()
+    canvas.rotate(-note.rotationDegrees.toFloat(), anchor.x, anchor.y)
+    canvas.drawRoundRect(bounds, 4f * density, 4f * density, background)
+    canvas.drawRoundRect(bounds, 4f * density, 4f * density, outline)
+    canvas.drawText(note.text, anchor.x, anchor.y, paint)
+    canvas.restore()
+}
+
+private fun noteFontSize(note: PlanNote, pixelsPerMillimeter: Float, density: Float): Float =
+    (note.heightMm.toFloat() * pixelsPerMillimeter).coerceIn(14f * density, 48f * density)
+
+internal fun findNoteAt(
+    notes: List<PlanNote>,
+    tap: Offset,
+    canvasSize: IntSize,
+    viewport: PlanViewportState,
+    density: Float
+): Int? {
+    return notes.mapIndexedNotNull { index, note ->
+        val anchor = viewport.project(note.position, canvasSize)
+        val fontSize = noteFontSize(note, viewport.pixelsPerMillimeter, density)
+        val dx = tap.x - anchor.x
+        val dy = tap.y - anchor.y
+        val radians = Math.toRadians(note.rotationDegrees)
+        val localX = dx * kotlin.math.cos(radians).toFloat() - dy * kotlin.math.sin(radians).toFloat()
+        val localY = dx * kotlin.math.sin(radians).toFloat() + dy * kotlin.math.cos(radians).toFloat()
+        val padding = 10f * density
+        val estimatedTextWidth = (note.textWidthMm / note.heightMm * fontSize).toFloat()
+        val withinLabel = localX in -padding..(estimatedTextWidth + padding) &&
+            localY in (-fontSize - padding)..(fontSize * NOTE_TEXT_DESCENT_FACTOR.toFloat() + padding)
+        if (withinLabel) index to (tap - anchor).getDistance() else null
+    }.minByOrNull { it.second }?.first
+}
+
 private fun findEndpointAt(
     segments: List<WallSegment>,
     tap: Offset,
@@ -832,7 +953,7 @@ private fun findEndpointAt(
     viewport: PlanViewportState,
     tolerancePx: Float
 ): PointMm? {
-    val endpoints = (listOf(PointMm(0.0, 0.0)) + segments.flatMap { listOf(it.start, it.end) }).distinct()
+    val endpoints = (listOf(PointMm(0.0, 0.0)) + PlanGeometry.wallInteractionPoints(segments)).distinct()
     return endpoints
         .map { endpoint -> endpoint to (tap - viewport.project(endpoint, canvasSize)).getDistance() }
         .filter { (_, distance) -> distance <= tolerancePx }
@@ -848,7 +969,7 @@ private fun findNearbyEndpoint(
     viewport: PlanViewportState,
     tolerancePx: Float
 ): PointMm? {
-    val endpoints = (listOf(PointMm(0.0, 0.0)) + segments.flatMap { listOf(it.start, it.end) })
+    val endpoints = (listOf(PointMm(0.0, 0.0)) + PlanGeometry.wallInteractionPoints(segments))
         .distinct()
         .filterNot { it == startPoint }
     val endOnScreen = viewport.project(endPoint, canvasSize)
@@ -859,6 +980,7 @@ private fun findNearbyEndpoint(
         ?.first
 }
 
+private const val NOTE_TEXT_DESCENT_FACTOR = 0.25
 private const val ENDPOINT_SNAP_TOLERANCE_DP = 40f
 private const val MILLIMETERS_PER_METER = 1_000.0
 private const val DEFAULT_VIEW_HALF_SPAN_MM = 5_000.0
@@ -887,28 +1009,44 @@ internal fun formatScaleCoordinate(coordinateMm: Double, divisionMm: Double): St
     }
 }
 
+private data class SegmentHit(val index: Int, val distancePx: Float, val lineLengthPx: Float)
+
+internal fun shouldSelectShortLineOnTap(
+    lineLengthPx: Float,
+    nearestEndpointDistancePx: Float,
+    endpointTargetPx: Float
+): Boolean = lineLengthPx <= endpointTargetPx * 2f &&
+    nearestEndpointDistancePx > lineLengthPx / 4f
+
 private fun findSegmentAt(
     segments: List<WallSegment>,
     tap: Offset,
     canvasSize: IntSize,
     viewport: PlanViewportState,
     tolerancePx: Float
-): Int? {
+): SegmentHit? {
     val wallShapes = PlanGeometry.wallFootprints(segments)
-    return segments.indices.map { index ->
+    return segments.indices.mapNotNull { index ->
         val segment = segments[index]
-        val lineDistance = distanceFromPointToSegment(
-            tap,
-            viewport.project(segment.start, canvasSize),
-            viewport.project(segment.end, canvasSize)
-        )
-        val isInsideWall = wallShapes[index]
-            .any { polygon -> pointInPolygon(tap, polygon.map { viewport.project(it, canvasSize) }) }
-        index to if (isInsideWall) 0f else lineDistance
+        val screenStart = viewport.project(segment.start, canvasSize)
+        val screenEnd = viewport.project(segment.end, canvasSize)
+        val lineDistance = distanceFromPointToSegment(tap, screenStart, screenEnd)
+        val lineLengthPx = (screenEnd - screenStart).getDistance()
+        val screenPolygons = wallShapes[index].map { polygon -> polygon.map { viewport.project(it, canvasSize) } }
+        val isInsideWall = screenPolygons.any { polygon -> pointInPolygon(tap, polygon) }
+        val wallEdgeDistance = screenPolygons
+            .flatMap { polygon -> polygon.indices.map { edgeIndex ->
+                distanceFromPointToSegment(tap, polygon[edgeIndex], polygon[(edgeIndex + 1) % polygon.size])
+            } }
+            .minOrNull()
+        val distance = when {
+            isInsideWall -> 0f
+            wallEdgeDistance != null -> minOf(lineDistance, wallEdgeDistance)
+            else -> lineDistance
+        }
+        if (distance <= tolerancePx) SegmentHit(index, distance, lineLengthPx) else null
     }
-    .filter { (_, distance) -> distance <= tolerancePx }
-    .minByOrNull { (_, distance) -> distance }
-    ?.first
+    .minByOrNull { it.distancePx }
 }
 
 private fun pointInPolygon(point: Offset, polygon: List<Offset>): Boolean {

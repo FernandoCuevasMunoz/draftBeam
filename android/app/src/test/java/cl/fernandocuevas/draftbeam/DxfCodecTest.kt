@@ -56,6 +56,61 @@ class DxfCodecTest {
     }
 
     @Test
+    fun notesRoundTripThroughStandardDxfTextEntities() {
+        val note = PlanNote("Kitchen note", PointMm(-250.0, 800.0))
+        val dxf = DxfCodec.encode(emptyList(), listOf(note))
+
+        assertTrue(dxf.contains("\nTEXT\n"))
+        assertEquals(listOf(note), DxfCodec.decode(dxf).notes)
+        assertTrue(DxfCodec.decode(dxf).warnings.isEmpty())
+    }
+
+    @Test
+    fun externalTextWithMetersConvertsPositionAndHeightToMillimeters() {
+        val dxf = """
+            0
+            SECTION
+            2
+            HEADER
+            9
+            ${'$'}INSUNITS
+            70
+            6
+            0
+            ENDSEC
+            0
+            SECTION
+            2
+            ENTITIES
+            0
+            TEXT
+            8
+            0
+            10
+            0.25
+            20
+            0.8
+            30
+            0
+            40
+            0.1
+            1
+            Kitchen
+            50
+            30
+            0
+            ENDSEC
+            0
+            EOF
+        """.trimIndent()
+
+        val imported = DxfCodec.decode(dxf)
+
+        assertEquals(listOf(PlanNote("Kitchen", PointMm(250.0, 800.0), 100.0, 30.0)), imported.notes)
+        assertTrue(imported.warnings.isEmpty())
+    }
+
+    @Test
     fun externalLineWithMetersIsConvertedToMillimeters() {
         val dxf = """
             0
