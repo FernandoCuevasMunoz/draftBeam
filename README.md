@@ -11,8 +11,8 @@ draftBeam es una aplicación **Android de código abierto** para capturar medida
 - Conectar un telémetro compatible por BLE y convertir sus lecturas de metros a milímetros. El dispositivo probado se identifica como `M130` (Milessey M120 Pro); otros modelos no están verificados.
 - Crear muros a partir de lecturas, elegir dirección `X+`, `X−`, `Y+` o `Y−`, o dibujar segmentos aproximados con el dedo. Editar longitud, ancho y lado de crecimiento de cada muro.
 - Seleccionar extremos existentes, acercar/alejar y desplazar el plano; ver una lupa y optar por conectar extremos cercanos al terminar un trazo.
-- Deshacer cambios geométricos y abrir el plano a pantalla completa.
-- Guardar y abrir archivos DXF locales mediante el selector de documentos de Android. La exportación usa milímetros y entidades estándar para líneas, contornos de muros, hatch y cotas.
+- Deshacer cambios geométricos, agregar notas de texto al plano, seleccionarlas para editarlas o eliminarlas, y abrir el plano a pantalla completa.
+- Guardar y abrir archivos DXF locales mediante el selector de documentos de Android. La exportación usa milímetros y entidades estándar para líneas, contornos de muros, hatch, cotas y notas `TEXT`; las notas se recuperan al abrir el DXF.
 
 > **Alcance DXF:** no es un editor CAD general. La importación admite las entidades compatibles implementadas; puede omitir arcos, bloques, splines y otras entidades avanzadas. Guarda una copia del DXF original antes de editarlo.
 
@@ -43,7 +43,7 @@ La configuración de compilación usa `targetSdk 37` y `compileSdk 37`. **Androi
 
    El APK de depuración se genera en `android/app/build/outputs/apk/debug/app-debug.apk`.
 3. Concede los permisos solicitados por Android. Usa **Conectar BLE** para buscar y elegir el medidor; el nombre se muestra como conectado cuando termina la suscripción a las mediciones.
-4. Selecciona una dirección y mide, o arrastra desde un extremo del plano para trazar un muro. Usa **Guardar DXF** para elegir dónde guardar el archivo; **Abrir DXF** reemplaza el plano actual tras confirmación.
+4. Selecciona una dirección y mide, arrastra desde un extremo o usa **Nueva línea** para ingresar largo, ancho y lado de crecimiento. Usa **Agregar nota**, escribe el texto y toca el plano para ubicarla; al seleccionarla, puedes editarla o eliminarla desde la barra inferior. Usa **Guardar DXF** para elegir dónde guardar el archivo; **Abrir DXF** reemplaza el plano actual tras confirmación.
 
 Si solo quieres explorar el editor, puedes dibujar con el dedo sin conectar un medidor. Las líneas trazadas así tienen longitud aproximada: ajusta el valor numéricamente antes de exportar si necesitas precisión.
 

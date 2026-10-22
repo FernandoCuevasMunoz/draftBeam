@@ -48,6 +48,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.foundation.verticalScroll
@@ -62,6 +64,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
@@ -69,14 +72,17 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Straighten
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -108,6 +114,7 @@ import java.util.UUID
 
 private data class PlanSnapshot(
     val segments: List<WallSegment>,
+    val notes: List<PlanNote>,
     val selectedStartPoint: PointMm?
 )
 
@@ -152,6 +159,7 @@ class MainActivity : ComponentActivity() {
     private val devices = mutableStateListOf<ScannedMeter>()
     private val notifications = mutableStateListOf<MeasurementNotification>()
     private val wallSegments = mutableStateListOf<WallSegment>()
+    private val planNotes = mutableStateListOf<PlanNote>()
     private val undoHistory = mutableStateListOf<PlanSnapshot>()
     private val latestMeasurementMm = mutableStateOf<Long?>(null)
     private val newLengthFieldFocused = mutableStateOf(false)
@@ -159,6 +167,7 @@ class MainActivity : ComponentActivity() {
     private var lengthMeasurementEventId = 0
     private val selectedAngleDegrees = mutableStateOf(WallDirection.X_POSITIVE.angleDegrees)
     private val selectedWallIndex = mutableStateOf<Int?>(null)
+    private val selectedNoteIndex = mutableStateOf<Int?>(null)
     private val wallEditorOpen = mutableStateOf(false)
     private val selectedStartPoint = mutableStateOf<PointMm?>(null)
     private val pendingEndpointMove = mutableStateOf<PendingEndpointMove?>(null)
@@ -382,10 +391,12 @@ class MainActivity : ComponentActivity() {
                     devices = devices.toList(),
                     notifications = notifications.toList(),
                     wallSegments = wallSegments.toList(),
+                    notes = planNotes.toList(),
                     canUndo = undoHistory.isNotEmpty(),
                     latestMeasurementMm = latestMeasurementMm.value,
                     selectedAngleDegrees = selectedAngleDegrees.value,
                     selectedWallIndex = selectedWallIndex.value,
+                    selectedNoteIndex = selectedNoteIndex.value,
                     wallEditorOpen = wallEditorOpen.value,
                     pendingEndpointMove = pendingEndpointMove.value,
                     lengthMeasurementEvent = lengthMeasurementEvent.value,
@@ -412,9 +423,20 @@ class MainActivity : ComponentActivity() {
                     onUndoClick = ::undoLastPlanAction,
                     onWallSelected = {
                         selectedWallIndex.value = it
+                        selectedNoteIndex.value = null
                         wallEditorOpen.value = false
                     },
+                    onNoteSelected = { index ->
+                        selectedNoteIndex.value = index
+                        selectedWallIndex.value = null
+                        wallEditorOpen.value = false
+                    },
+                    onNotePlaced = { text, position -> addNote(text, position).also { status.value = it } },
+                    onNoteEdited = { index, text -> updateNote(index, text).also { status.value = it } },
                     onEditWallClick = { wallEditorOpen.value = selectedWallIndex.value != null },
+                    onCreateWall = { start, angle, length, width, side ->
+                        addManualWall(start, angle, length, width, side).also { status.value = it }
+                    },
                     onEndpointMoveRequested = ::requestEndpointMove,
                     onMoveEndpoint = ::moveEndpoint,
                     onDismissEndpointMove = { pendingEndpointMove.value = null },
@@ -433,6 +455,7 @@ class MainActivity : ComponentActivity() {
                     onStartPointSelected = { point ->
                         selectedStartPoint.value = point
                         selectedWallIndex.value = null
+                        selectedNoteIndex.value = null
                         wallEditorOpen.value = false
                         status.value = "Punto de continuación seleccionado: ${point.formatCoordinates()} mm."
                     }
@@ -532,12 +555,70 @@ class MainActivity : ComponentActivity() {
             val endpoint = updatedSegments.last().end
             selectedStartPoint.value = endpoint
             selectedWallIndex.value = null
+            selectedNoteIndex.value = null
             wallEditorOpen.value = false
             return "Muro agregado automáticamente: $measurement mm a ${selectedAngleDegrees.value.formatAngle()}°. Extremo ${endpoint.formatCoordinates()} mm."
         } catch (exception: IllegalArgumentException) {
             return exception.message ?: "La medida no es válida para crear un muro."
         } catch (_: ArithmeticException) {
             return "El plano excede el rango de coordenadas permitido."
+        }
+    }
+
+    private fun addManualWall(
+        start: PointMm,
+        angleDegrees: Double,
+        lengthMm: Long,
+        widthMm: Long,
+        growthSide: WallGrowthSide
+    ): String {
+        return try {
+            val segment = PlanGeometry.createWall(
+                existingSegments = wallSegments.toList(),
+                angleDegrees = angleDegrees,
+                lengthMm = lengthMm,
+                startPoint = start,
+                widthMm = widthMm,
+                growthSide = growthSide
+            )
+            pushPlanSnapshot()
+            wallSegments.add(segment)
+            selectedStartPoint.value = segment.end
+            selectedWallIndex.value = null
+            selectedNoteIndex.value = null
+            wallEditorOpen.value = false
+            "Muro creado: ${segment.lengthMm} mm, ancho ${segment.widthMm} mm, ${segment.growthSide.axisLabel(segment.angleDegrees)}."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo crear el muro."
+        } catch (_: ArithmeticException) {
+            "El plano excede el rango de coordenadas permitido."
+        }
+    }
+
+    private fun addNote(rawText: String, position: PointMm): String {
+        return try {
+            val note = PlanNote(rawText.trim(), position)
+            pushPlanSnapshot()
+            planNotes.add(note)
+            selectedNoteIndex.value = planNotes.lastIndex
+            selectedWallIndex.value = null
+            "Nota agregada al plano."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo agregar la nota."
+        }
+    }
+
+    private fun updateNote(index: Int, rawText: String): String {
+        val oldNote = planNotes.getOrNull(index) ?: return "La nota seleccionada ya no existe."
+        return try {
+            val updatedNote = oldNote.copy(text = rawText.trim())
+            if (updatedNote != oldNote) {
+                pushPlanSnapshot()
+                planNotes[index] = updatedNote
+            }
+            "Nota actualizada."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo actualizar la nota."
         }
     }
 
@@ -549,6 +630,7 @@ class MainActivity : ComponentActivity() {
             selectedStartPoint.value = segment.end
             selectedAngleDegrees.value = segment.angleDegrees
             selectedWallIndex.value = null
+            selectedNoteIndex.value = null
             wallEditorOpen.value = false
             status.value = "Muro dibujado: ${segment.lengthMm} mm a ${segment.angleDegrees.formatAngle()}°."
         } catch (exception: IllegalArgumentException) {
@@ -621,7 +703,7 @@ class MainActivity : ComponentActivity() {
             val output = contentResolver.openOutputStream(uri)
                 ?: throw IllegalStateException("Android no pudo abrir el archivo para escritura.")
             output.bufferedWriter(Charsets.UTF_8).use { writer ->
-                writer.write(DxfCodec.encode(wallSegments.toList()))
+                writer.write(DxfCodec.encode(wallSegments.toList(), planNotes.toList()))
             }
             status.value = "Plano guardado como DXF en la ubicación elegida."
         } catch (exception: Exception) {
@@ -648,10 +730,13 @@ class MainActivity : ComponentActivity() {
             }
             val imported = DxfCodec.decode(contents)
             val before = wallSegments.toList()
-            if (before != imported.segments) pushPlanSnapshot()
+            if (before != imported.segments || planNotes.toList() != imported.notes) pushPlanSnapshot()
             wallSegments.clear()
             wallSegments.addAll(imported.segments)
+            planNotes.clear()
+            planNotes.addAll(imported.notes)
             selectedWallIndex.value = null
+            selectedNoteIndex.value = null
             wallEditorOpen.value = false
             pendingEndpointMove.value = null
             selectedStartPoint.value = imported.segments.lastOrNull()?.end
@@ -666,6 +751,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun deleteSelectedWall() {
+        selectedNoteIndex.value?.let { index ->
+            if (planNotes.getOrNull(index) != null) {
+                pushPlanSnapshot()
+                planNotes.removeAt(index)
+                selectedNoteIndex.value = null
+                status.value = "Nota eliminada."
+            }
+            return
+        }
         val index = selectedWallIndex.value ?: return
         try {
             val updatedSegments = PlanGeometry.removeSegment(wallSegments.toList(), index)
@@ -691,6 +785,7 @@ class MainActivity : ComponentActivity() {
         undoHistory.add(
             PlanSnapshot(
                 segments = wallSegments.toList(),
+                notes = planNotes.toList(),
                 selectedStartPoint = selectedStartPoint.value
             )
         )
@@ -700,8 +795,11 @@ class MainActivity : ComponentActivity() {
         val previous = undoHistory.removeLastOrNull() ?: return
         wallSegments.clear()
         wallSegments.addAll(previous.segments)
+        planNotes.clear()
+        planNotes.addAll(previous.notes)
         selectedStartPoint.value = previous.selectedStartPoint
         selectedWallIndex.value = null
+        selectedNoteIndex.value = null
         wallEditorOpen.value = false
         pendingEndpointMove.value = null
         status.value = "Última acción del plano deshecha."
@@ -732,10 +830,12 @@ fun DraftBeamScreen(
     devices: List<ScannedMeter>,
     notifications: List<MeasurementNotification>,
     wallSegments: List<WallSegment>,
+    notes: List<PlanNote>,
     canUndo: Boolean,
     latestMeasurementMm: Long?,
     selectedAngleDegrees: Double,
     selectedWallIndex: Int?,
+    selectedNoteIndex: Int?,
     wallEditorOpen: Boolean,
     pendingEndpointMove: PendingEndpointMove?,
     lengthMeasurementEvent: LengthMeasurement?,
@@ -753,6 +853,10 @@ fun DraftBeamScreen(
     onUndoClick: () -> Unit,
     onWallSelected: (Int?) -> Unit,
     onEditWallClick: () -> Unit,
+    onCreateWall: (PointMm, Double, Long, Long, WallGrowthSide) -> Unit,
+    onNoteSelected: (Int?) -> Unit,
+    onNotePlaced: (String, PointMm) -> Unit,
+    onNoteEdited: (Int, String) -> Unit,
     onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
     onMoveEndpoint: (PendingEndpointMove, Boolean) -> Unit,
     onDismissEndpointMove: () -> Unit,
@@ -770,27 +874,18 @@ fun DraftBeamScreen(
     var showBleDialog by remember { mutableStateOf(false) }
     var overflowMenuExpanded by remember { mutableStateOf(false) }
     var pendingConnection by remember { mutableStateOf<PendingConnection?>(null) }
+    var showNewWallSheet by remember { mutableStateOf(false) }
+    var focusWallWidth by remember { mutableStateOf(false) }
+    var showNoteDialog by remember { mutableStateOf(false) }
+    var noteEditIndex by remember { mutableStateOf<Int?>(null) }
+    var noteTextDraft by remember { mutableStateOf("") }
+    var pendingNoteText by remember { mutableStateOf<String?>(null) }
     val density = LocalDensity.current
     val gridIntervalMm = with(density) {
         selectGridStepMm(24.dp.toPx(), viewport.pixelsPerMillimeter)
     }
-    var previousSegmentCount by remember { mutableIntStateOf(wallSegments.size) }
-    var previousWallProfiles by remember {
-        mutableStateOf(wallSegments.map { it.widthMm to it.growthSide })
-    }
-    LaunchedEffect(wallSegments.size) {
-        if (wallSegments.size > previousSegmentCount) {
-            viewport.fitToContent(wallSegments)
-        }
-        previousSegmentCount = wallSegments.size
-    }
     LaunchedEffect(dxfImportRevision) {
-        if (dxfImportRevision > 0) viewport.fitToContent(wallSegments)
-    }
-    val wallProfiles = wallSegments.map { it.widthMm to it.growthSide }
-    LaunchedEffect(wallProfiles) {
-        if (wallProfiles != previousWallProfiles) viewport.fitToContent(wallSegments)
-        previousWallProfiles = wallProfiles
+        if (dxfImportRevision > 0) viewport.fitToContent(wallSegments, notes)
     }
 
     val requestLoadDxf = {
@@ -904,12 +999,20 @@ fun DraftBeamScreen(
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 PlanPreview(
                     segments = wallSegments,
+                    notes = notes,
                     selectedSegmentIndex = selectedWallIndex,
+                    selectedNoteIndex = selectedNoteIndex,
+                    pendingNotePlacement = pendingNoteText != null,
                     selectedStartPoint = selectedStartPoint,
                     selectedAngleDegrees = selectedAngleDegrees,
                     viewport = viewport,
                     onDirectionSelected = onDirectionSelected,
                     onSegmentSelected = onWallSelected,
+                    onNoteSelected = onNoteSelected,
+                    onNotePlaced = { position -> pendingNoteText?.let { text ->
+                        onNotePlaced(text, position)
+                        pendingNoteText = null
+                    } },
                     onStartPointSelected = onStartPointSelected,
                     onFingerDrawn = onFingerDrawn,
                     onEndpointMoveRequested = onEndpointMoveRequested,
@@ -918,6 +1021,21 @@ fun DraftBeamScreen(
                     },
                     modifier = Modifier.fillMaxSize()
                 )
+                pendingNoteText?.let {
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 42.dp),
+                        color = DraftBeamColors.PanelBackground.copy(alpha = 0.96f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 12.dp, end = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Tocá el plano para colocar la nota", style = MaterialTheme.typography.labelMedium)
+                            TextButton(onClick = { pendingNoteText = null }) { Text("Cancelar") }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -954,7 +1072,7 @@ fun DraftBeamScreen(
                         icon = Icons.Filled.CenterFocusStrong,
                         label = "Ajustar plano",
                         enabled = true,
-                        onClick = { viewport.fitToContent(wallSegments) }
+                        onClick = { viewport.fitToContent(wallSegments, notes) }
                     )
                     OverlayIconButton(
                         icon = Icons.Filled.Layers,
@@ -1035,11 +1153,35 @@ fun DraftBeamScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndoClick)
-                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null, onEditWallClick)
-                    BottomAction(Icons.Filled.OpenWith, "Dirección", enabled = false, onClick = {})
-                    BottomAction(Icons.Filled.FolderOpen, "Abrir", enabled = false, onClick = {})
-                    BottomAction(Icons.Filled.Save, "Guardar", enabled = false, onClick = {})
+                    BottomAction(Icons.Filled.Add, "Nueva línea", enabled = true, onClick = { showNewWallSheet = true }, modifier = Modifier.weight(1f))
+                    BottomAction(Icons.Filled.Edit, "Editar", selectedWallIndex != null || selectedNoteIndex != null, onClick = {
+                        val noteIndex = selectedNoteIndex
+                        if (noteIndex != null) {
+                            notes.getOrNull(noteIndex)?.let { note ->
+                                noteEditIndex = noteIndex
+                                noteTextDraft = note.text
+                                showNoteDialog = true
+                            }
+                        } else {
+                            focusWallWidth = false
+                            onEditWallClick()
+                        }
+                    }, modifier = Modifier.weight(1f))
+                    BottomAction(Icons.Filled.Delete, "Eliminar", selectedWallIndex != null || selectedNoteIndex != null, onDeleteWallClick, modifier = Modifier.weight(1f))
+                    BottomAction(Icons.Filled.Straighten, "Ancho", selectedWallIndex != null, onClick = {
+                        focusWallWidth = true
+                        onEditWallClick()
+                    }, modifier = Modifier.weight(1f))
+                    BottomAction(Icons.AutoMirrored.Filled.NoteAdd, "Agregar nota", enabled = true, onClick = {
+                        if (pendingNoteText != null) {
+                            pendingNoteText = null
+                        } else {
+                            noteEditIndex = null
+                            noteTextDraft = ""
+                            showNoteDialog = true
+                        }
+                    }, modifier = Modifier.weight(1f))
+                    BottomAction(Icons.AutoMirrored.Filled.Undo, "Deshacer", canUndo, onUndoClick, modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -1128,12 +1270,20 @@ fun DraftBeamScreen(
                     }
                     PlanPreview(
                         segments = wallSegments,
+                        notes = notes,
                         selectedSegmentIndex = selectedWallIndex,
+                        selectedNoteIndex = selectedNoteIndex,
+                        pendingNotePlacement = pendingNoteText != null,
                         selectedStartPoint = selectedStartPoint,
                         selectedAngleDegrees = selectedAngleDegrees,
                         viewport = viewport,
                         onDirectionSelected = onDirectionSelected,
                         onSegmentSelected = onWallSelected,
+                        onNoteSelected = onNoteSelected,
+                        onNotePlaced = { position -> pendingNoteText?.let { text ->
+                            onNotePlaced(text, position)
+                            pendingNoteText = null
+                        } },
                         onStartPointSelected = onStartPointSelected,
                         onFingerDrawn = onFingerDrawn,
                         onEndpointMoveRequested = onEndpointMoveRequested,
@@ -1147,7 +1297,7 @@ fun DraftBeamScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
-                            onClick = { viewport.fitToContent(wallSegments) },
+                            onClick = { viewport.fitToContent(wallSegments, notes) },
                             modifier = Modifier.weight(1f)
                         ) { Text("Ajustar plano") }
                         Button(
@@ -1159,6 +1309,49 @@ fun DraftBeamScreen(
                 }
             }
         }
+    }
+
+    if (showNoteDialog) {
+        val editingNote = noteEditIndex != null
+        AlertDialog(
+            onDismissRequest = {
+                showNoteDialog = false
+                noteEditIndex = null
+            },
+            title = { Text(if (editingNote) "Editar nota" else "Agregar nota") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = noteTextDraft,
+                        onValueChange = { noteTextDraft = it.filter { character -> character != '\n' && character != '\r' }.take(255) },
+                        label = { Text("Texto de la nota") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (!editingNote) {
+                        Text("Después vas a tocar el plano para elegir dónde colocarla.", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = noteTextDraft.isNotBlank(),
+                    onClick = {
+                        val text = noteTextDraft.trim()
+                        val index = noteEditIndex
+                        if (index == null) pendingNoteText = text else onNoteEdited(index, text)
+                        showNoteDialog = false
+                        noteEditIndex = null
+                    }
+                ) { Text(if (editingNote) "Guardar" else "Continuar") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showNoteDialog = false
+                    noteEditIndex = null
+                }) { Text("Cancelar") }
+            }
+        )
     }
 
     pendingEndpointMove?.let { move ->
@@ -1185,6 +1378,7 @@ fun DraftBeamScreen(
         WallEditorSheet(
             segment = editingSegment,
             index = selectedWallIndex,
+            focusWidth = focusWallWidth,
             lengthMeasurementEvent = lengthMeasurementEvent,
             onNewLengthFieldFocusChanged = onNewLengthFieldFocusChanged,
             onLengthMeasurementConsumed = onLengthMeasurementConsumed,
@@ -1194,6 +1388,19 @@ fun DraftBeamScreen(
                 onDismissWallEditor()
             },
             onDelete = onDeleteWallClick
+        )
+    }
+
+    if (showNewWallSheet) {
+        val startPoint = selectedStartPoint ?: wallSegments.lastOrNull()?.end ?: PointMm(0.0, 0.0)
+        NewWallSheet(
+            startPoint = startPoint,
+            angleDegrees = selectedAngleDegrees,
+            onDismiss = { showNewWallSheet = false },
+            onCreateWall = { length, width, side ->
+                onCreateWall(startPoint, selectedAngleDegrees, length, width, side)
+                showNewWallSheet = false
+            }
         )
     }
 
@@ -1243,10 +1450,11 @@ private fun BottomAction(
     icon: ImageVector,
     label: String,
     enabled: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier.width(64.dp)
 ) {
     Column(
-        modifier = Modifier.width(64.dp),
+        modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(1.dp)
     ) {
@@ -1273,6 +1481,7 @@ private fun formatLastMeasurement(millimeters: Long): String {
 private fun WallEditorSheet(
     segment: WallSegment,
     index: Int,
+    focusWidth: Boolean,
     lengthMeasurementEvent: LengthMeasurement?,
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
     onLengthMeasurementConsumed: (Int) -> Unit,
@@ -1284,7 +1493,11 @@ private fun WallEditorSheet(
     var widthText by remember(index, segment.widthMm) { mutableStateOf("") }
     var growthSide by remember(index, segment.growthSide) { mutableStateOf(segment.growthSide) }
     var validationError by remember(index) { mutableStateOf<String?>(null) }
+    val widthFocusRequester = remember { FocusRequester() }
 
+    LaunchedEffect(focusWidth) {
+        if (focusWidth) widthFocusRequester.requestFocus()
+    }
     LaunchedEffect(lengthMeasurementEvent?.id) {
         lengthMeasurementEvent?.let { event ->
             onLengthMeasurementConsumed(event.id)
@@ -1336,6 +1549,7 @@ private fun WallEditorSheet(
                     placeholder = segment.widthMm.toString(),
                     supportingText = "Actual: ${segment.widthMm} mm",
                     modifier = Modifier.weight(1f),
+                    focusRequester = widthFocusRequester.takeIf { focusWidth },
                     onValueChange = { input ->
                         widthText = input.filter(Char::isDigit)
                         validationError = null
@@ -1420,6 +1634,113 @@ private fun WallEditorSheet(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NewWallSheet(
+    startPoint: PointMm,
+    angleDegrees: Double,
+    onDismiss: () -> Unit,
+    onCreateWall: (Long, Long, WallGrowthSide) -> Unit
+) {
+    var lengthText by remember { mutableStateOf("") }
+    var widthText by remember { mutableStateOf("") }
+    var growthSide by remember(angleDegrees) { mutableStateOf(PlanGeometry.defaultGrowthSide(angleDegrees)) }
+    var validationError by remember { mutableStateOf<String?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = DraftBeamColors.Surface,
+        contentColor = DraftBeamColors.TextPrimary,
+        dragHandle = { BottomSheetDefaults.DragHandle(color = DraftBeamColors.TextMuted) }
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Nueva línea", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Inicio ${startPoint.formatCoordinates()} mm · ${wallOrientationLabel(angleDegrees)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = DraftBeamColors.TextSecondary
+                )
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                WallEditorField(
+                    label = "Largo (mm)",
+                    value = lengthText,
+                    supportingText = "Ingresa la longitud",
+                    modifier = Modifier.weight(1f),
+                    onValueChange = { input ->
+                        lengthText = input.filter(Char::isDigit)
+                        validationError = null
+                    }
+                )
+                WallEditorField(
+                    label = "Ancho muro (mm)",
+                    value = widthText,
+                    placeholder = "0",
+                    supportingText = "0 = línea sin ancho",
+                    modifier = Modifier.weight(1f),
+                    onValueChange = { input ->
+                        widthText = input.filter(Char::isDigit)
+                        validationError = null
+                    }
+                )
+                WallEditorField(
+                    label = "Dirección",
+                    value = wallOrientationLabel(angleDegrees),
+                    supportingText = "Ángulo ${angleDegrees.formatAngle()}°",
+                    modifier = Modifier.weight(1f),
+                    readOnly = true
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Lado de crecimiento del muro", style = MaterialTheme.typography.labelLarge, color = DraftBeamColors.TextSecondary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WallGrowthSide.orderedForAngle(angleDegrees).forEach { side ->
+                        Button(
+                            onClick = { growthSide = side },
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            border = if (growthSide == side) null else BorderStroke(1.dp, DraftBeamColors.Border),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (growthSide == side) DraftBeamColors.Primary else DraftBeamColors.SurfaceElevated,
+                                contentColor = DraftBeamColors.TextPrimary
+                            ),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                        ) {
+                            Text(wallGrowthDirectionLabel(side, angleDegrees), maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+
+            validationError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                    Text("Cancelar")
+                }
+                Button(
+                    onClick = {
+                        val length = lengthText.toLongOrNull()
+                        val width = widthText.toLongOrNull() ?: if (widthText.isBlank()) 0L else null
+                        when {
+                            length == null || length <= 0 -> validationError = "Ingresa una longitud mayor que cero."
+                            width == null || width < 0 -> validationError = "Ingresa un ancho de cero o más milímetros."
+                            else -> onCreateWall(length, width, growthSide)
+                        }
+                    },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = DraftBeamColors.Primary)
+                ) { Text("Crear línea") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun WallEditorField(
     label: String,
@@ -1429,7 +1750,8 @@ private fun WallEditorField(
     modifier: Modifier = Modifier,
     readOnly: Boolean = false,
     onValueChange: (String) -> Unit = {},
-    onFocusChanged: (Boolean) -> Unit = {}
+    onFocusChanged: (Boolean) -> Unit = {},
+    focusRequester: FocusRequester? = null
 ) {
     Surface(
         modifier = modifier.heightIn(min = 92.dp),
@@ -1445,7 +1767,9 @@ private fun WallEditorField(
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
-                modifier = Modifier.fillMaxWidth().onFocusChanged { onFocusChanged(it.isFocused) },
+                modifier = Modifier.fillMaxWidth()
+                    .then(focusRequester?.let(Modifier::focusRequester) ?: Modifier)
+                    .onFocusChanged { onFocusChanged(it.isFocused) },
                 readOnly = readOnly,
                 singleLine = true,
                 textStyle = TextStyle(
