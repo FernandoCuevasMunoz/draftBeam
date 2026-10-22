@@ -15,6 +15,25 @@ class PlanGeometryTest {
     }
 
     @Test
+    fun manuallyCreatedWallUsesActiveStartDirectionWidthAndGrowthSide() {
+        val wall = PlanGeometry.createWall(
+            existingSegments = emptyList(),
+            angleDegrees = 90.0,
+            lengthMm = 2_400,
+            startPoint = PointMm(500.0, 250.0),
+            widthMm = 120,
+            growthSide = WallGrowthSide.RIGHT
+        )
+
+        assertEquals(PointMm(500.0, 250.0), wall.start)
+        assertEquals(PointMm(500.0, 2_650.0), wall.end)
+        assertEquals(2_400L, wall.lengthMm)
+        assertEquals(90.0, wall.angleDegrees, 0.0)
+        assertEquals(120L, wall.widthMm)
+        assertEquals(WallGrowthSide.RIGHT, wall.growthSide)
+    }
+
+    @Test
     fun eachNewWallStartsAtPreviousEndpoint() {
         val first = PlanGeometry.appendSegment(emptyList(), 0.0, 4_000)
         val second = PlanGeometry.appendSegment(first, 90.0, 3_000)
@@ -218,6 +237,22 @@ class PlanGeometryTest {
         assertEquals(
             PointMm(1_000.0, -100.0),
             PlanGeometry.wallCorners(wall.copy(growthSide = WallGrowthSide.RIGHT))[2]
+        )
+    }
+
+    @Test
+    fun wallInteractionPointsIncludeBothEdgesOfWallsWithWidth() {
+        val wall = WallSegment(
+            start = PointMm(0.0, 0.0),
+            end = PointMm(1_000.0, 0.0),
+            lengthMm = 1_000,
+            angleDegrees = 0.0,
+            widthMm = 100
+        )
+
+        assertEquals(
+            listOf(PointMm(0.0, 0.0), PointMm(1_000.0, 0.0), PointMm(1_000.0, 100.0), PointMm(0.0, 100.0)),
+            PlanGeometry.wallInteractionPoints(listOf(wall))
         )
     }
 
