@@ -5,11 +5,17 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="file" path="plan_session.bin" />
+        <exclude domain="file" path="plan_session.bin.bak" />
         <!-- TODO: Use <include> and <exclude> to control what is backed up.
         <include .../>
         <exclude .../>
         -->
     </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="plan_session.bin" />
+        <exclude domain="file" path="plan_session.bin.bak" />
+    </device-transfer>
     <!--
     <device-transfer>
         <include .../>

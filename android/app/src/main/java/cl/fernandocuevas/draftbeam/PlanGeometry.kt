@@ -128,7 +128,8 @@ object PlanGeometry {
     fun segmentFromDrag(
         start: PointMm,
         draggedEnd: PointMm,
-        snapToleranceDegrees: Double = DEFAULT_SNAP_TOLERANCE_DEGREES
+        snapToleranceDegrees: Double = DEFAULT_SNAP_TOLERANCE_DEGREES,
+        preserveEndPoint: Boolean = false
     ): WallSegment {
         val deltaX = draggedEnd.x - start.x
         val deltaY = draggedEnd.y - start.y
@@ -136,6 +137,9 @@ object PlanGeometry {
         require(draggedLength >= MIN_DRAG_LENGTH_MM) { "Arrastra un poco más para crear el muro." }
 
         val rawAngle = normalizeAngle(Math.toDegrees(atan2(deltaY, deltaX)))
+        if (preserveEndPoint) {
+            return WallSegment(start, draggedEnd, draggedLength.roundToLong().coerceAtLeast(1), rawAngle)
+        }
         val nearestAxis = WallDirection.entries.minBy { angularDistance(rawAngle, it.angleDegrees) }
         val angle = if (angularDistance(rawAngle, nearestAxis.angleDegrees) <= snapToleranceDegrees) {
             nearestAxis.angleDegrees
