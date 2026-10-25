@@ -19,6 +19,9 @@ object DxfCodec {
     private const val MAX_ENTITIES = 100_000
     private const val AXIS_LAYER_PREFIX = "FDXL_AXIS_"
     private const val WALL_LAYER_PREFIX = "FDXL_WALL_"
+    private const val VISIBLE_LAYER_PREFIX = "FDXL_VISIBLE_"
+    private const val OPENING_LAYER = "FDXL_OPENINGS"
+    private const val OPENING_APP_ID = "DRAFTBEAM"
 
     fun encode(segments: List<WallSegment>, notes: List<PlanNote> = emptyList()): String = buildString {
         val dimensions = segments.mapIndexedNotNull { index, segment ->
@@ -30,9 +33,11 @@ object DxfCodec {
             if (dimensions.isNotEmpty()) add(DIMENSION_LAYER to 7)
             if (notes.isNotEmpty()) add(NOTE_LAYER to 7)
             segments.forEachIndexed { index, segment ->
-                add(axisLayer(index) to 5) // ACI blue
+                add(axisLayer(index) to if (segment.openings.isEmpty()) 5 else -5) // hidden reconstruction axis
+                if (segment.openings.isNotEmpty()) add(visibleLayer(index) to 5)
                 if (segment.widthMm > 0L) add(wallLayer(index) to 30) // ACI orange
             }
+            if (segments.any { it.openings.isNotEmpty() }) add(OPENING_LAYER to 5)
         }
 
         pair(0, "SECTION")
@@ -114,6 +119,15 @@ object DxfCodec {
         pair(4, "")
         pair(0, "ENDTAB")
         pair(0, "TABLE")
+        pair(2, "APPID")
+        pair(70, "1")
+        pair(0, "APPID")
+        pair(100, "AcDbSymbolTableRecord")
+        pair(100, "AcDbRegAppTableRecord")
+        pair(2, OPENING_APP_ID)
+        pair(70, "0")
+        pair(0, "ENDTAB")
+        pair(0, "TABLE")
         pair(2, "LAYER")
         pair(70, layers.size.toString())
         layers.forEach { (name, color) ->
@@ -177,6 +191,7 @@ object DxfCodec {
 
         pair(0, "SECTION")
         pair(2, "ENTITIES")
+        segments.forEach(PlanGeometry::validateOpenings)
         val footprints = PlanGeometry.wallFootprints(segments)
         segments.forEachIndexed { index, segment ->
             if (segment.widthMm > 0L) {
@@ -199,16 +214,39 @@ object DxfCodec {
         }
         // Write measured axes last so they remain visible above the wall hatch.
         segments.forEachIndexed { index, segment ->
-            pair(0, "LINE")
-            pair(100, "AcDbEntity")
-            pair(8, axisLayer(index))
-            pair(100, "AcDbLine")
-            pair(10, number(segment.start.x))
-            pair(20, number(segment.start.y))
-            pair(30, "0")
-            pair(11, number(segment.end.x))
-            pair(21, number(segment.end.y))
-            pair(31, "0")
+            appendLine(axisLayer(index), segment.start, segment.end)
+            if (segment.openings.isNotEmpty()) {
+                pair(1001, OPENING_APP_ID)
+                segment.openings.forEach { opening -> pair(1000, encodeOpening(opening)) }
+                PlanGeometry.solidRanges(segment).forEach { (from, to) ->
+                    appendLine(visibleLayer(index), PlanGeometry.wallPoint(segment, from), PlanGeometry.wallPoint(segment, to))
+                }
+                segment.openings.forEach { opening ->
+                    if (opening.kind == OpeningKind.WINDOW) {
+                        OpeningGeometry.windowLines(segment, opening).forEach { line ->
+                            appendLine(OPENING_LAYER, line.start, line.end)
+                        }
+                    } else {
+                        val leaf = OpeningGeometry.doorLeaf(segment, opening)
+                        appendLine(OPENING_LAYER, leaf.start, leaf.end)
+                        val arc = OpeningGeometry.doorArc(segment, opening)
+                        val hinge = leaf.start
+                        fun angle(point: PointMm): Double = PlanGeometry.normalizeAngle(
+                            Math.toDegrees(atan2(point.y - hinge.y, point.x - hinge.x)))
+                        val cross = (arc[0].x - hinge.x) * (arc[1].y - hinge.y) -
+                            (arc[0].y - hinge.y) * (arc[1].x - hinge.x)
+                        pair(0, "ARC")
+                        pair(100, "AcDbEntity")
+                        pair(8, OPENING_LAYER)
+                        pair(100, "AcDbCircle")
+                        pair(10, number(hinge.x)); pair(20, number(hinge.y)); pair(30, "0")
+                        pair(40, opening.lengthMm.toString())
+                        pair(100, "AcDbArc")
+                        pair(50, number(angle(if (cross >= 0) arc.first() else arc.last())))
+                        pair(51, number(angle(if (cross >= 0) arc.last() else arc.first())))
+                    }
+                }
+            }
         }
         dimensions.forEach { geometry -> appendAlignedDimension(geometry) }
         notes.forEach { note ->
@@ -248,15 +286,15 @@ object DxfCodec {
             when (entity) {
                 is DxfLine -> {
                     val id = numberedLayerId(entity.layer, AXIS_LAYER_PREFIX)
-                    if (id == null) genericEntities += entity
-                    else axesById[id] = entity
+                    if (id != null) axesById[id] = entity
+                    else if (!isAppGeneratedLayer(entity.layer)) genericEntities += entity
                 }
                 is DxfPolyline -> {
                     val id = numberedLayerId(entity.layer, WALL_LAYER_PREFIX)
-                    if (id == null) genericEntities += entity
-                    else outlinesById.getOrPut(id) { mutableListOf() }.add(entity)
+                    if (id != null) outlinesById.getOrPut(id) { mutableListOf() }.add(entity)
+                    else if (!isAppGeneratedLayer(entity.layer)) genericEntities += entity
                 }
-                is DxfText -> genericEntities += entity
+                is DxfText -> if (!isAppGeneratedLayer(entity.layer)) genericEntities += entity
                 is DxfUnsupported -> if (!isAppGeneratedLayer(entity.layer)) ignored++
             }
         }
@@ -269,7 +307,11 @@ object DxfCodec {
                 return@forEach
             }
             val widthAndSide = inferWallWidth(line, outlinesById[id].orEmpty(), unitScale)
-            result += line.toWallSegment(widthAndSide.first, widthAndSide.second)
+            val wall = line.toWallSegment(widthAndSide.first, widthAndSide.second)
+            val openings = axis.openings.map(::decodeOpening)
+            val withOpenings = wall.copy(openings = openings)
+            PlanGeometry.validateOpenings(withOpenings)
+            result += withOpenings
         }
 
         genericEntities.forEach { entity ->
@@ -447,7 +489,12 @@ object DxfCodec {
         val start = PointMm(fields.number(10), fields.number(20))
         val end = PointMm(fields.number(11), fields.number(21))
         val nonPlanar = abs(fields.numberOrNull(30) ?: 0.0) > 1e-6 || abs(fields.numberOrNull(31) ?: 0.0) > 1e-6
-        return DxfLine(layer, start, end, nonPlanar)
+        val appIndex = fields.indexOfFirst { it.code == 1001 && it.value == OPENING_APP_ID }
+        val openings = if (appIndex < 0) emptyList() else fields.drop(appIndex + 1)
+            .takeWhile { it.code == 1000 }
+            .map { it.value }
+        require(openings.size <= 1000) { "El muro DXF contiene demasiados vanos." }
+        return DxfLine(layer, start, end, nonPlanar, openings)
     }
 
     private fun parseLwPolyline(fields: List<DxfPair>): DxfPolyline {
@@ -540,10 +587,39 @@ object DxfCodec {
 
     private fun isAppGeneratedLayer(layer: String): Boolean =
         layer.startsWith(WALL_LAYER_PREFIX, ignoreCase = true) ||
+            layer.startsWith(VISIBLE_LAYER_PREFIX, ignoreCase = true) ||
+            layer.equals(OPENING_LAYER, ignoreCase = true) ||
             layer.equals(DIMENSION_LAYER, ignoreCase = true)
 
     private fun axisLayer(index: Int) = "${AXIS_LAYER_PREFIX}${(index + 1).toString().padStart(4, '0')}"
     private fun wallLayer(index: Int) = "${WALL_LAYER_PREFIX}${(index + 1).toString().padStart(4, '0')}"
+    private fun visibleLayer(index: Int) = "${VISIBLE_LAYER_PREFIX}${(index + 1).toString().padStart(4, '0')}"
+
+    private fun encodeOpening(opening: WallOpening): String = listOf(
+        "DBO1", opening.kind.name, opening.offsetMm, opening.lengthMm, opening.alignment.name,
+        opening.frameWidthMm, if (opening.hingeAtStart) 1 else 0,
+        if (opening.swingTowardWall) 1 else 0, opening.openingAngleDegrees
+    ).joinToString(";")
+
+    private fun decodeOpening(value: String): WallOpening {
+        val fields = value.split(';')
+        require(fields.size == 9 && fields[0] == "DBO1") { "Vano DXF no compatible." }
+        require(fields[6] in listOf("0", "1") && fields[7] in listOf("0", "1")) {
+            "Dirección de puerta DXF inválida."
+        }
+        return WallOpening(OpeningKind.valueOf(fields[1]), fields[2].toLong(), fields[3].toLong(),
+            OpeningAlignment.valueOf(fields[4]), fields[5].toLong(), fields[6] == "1", fields[7] == "1",
+            fields[8].toInt())
+    }
+
+    private fun StringBuilder.appendLine(layer: String, start: PointMm, end: PointMm) {
+        pair(0, "LINE")
+        pair(100, "AcDbEntity")
+        pair(8, layer)
+        pair(100, "AcDbLine")
+        pair(10, number(start.x)); pair(20, number(start.y)); pair(30, "0")
+        pair(11, number(end.x)); pair(21, number(end.y)); pair(31, "0")
+    }
 
     private fun number(value: Double): String = BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
 
@@ -785,7 +861,7 @@ object DxfCodec {
         val textAngle: Double
     )
     private sealed interface DxfEntity
-    private data class DxfLine(val layer: String, val start: PointMm, val end: PointMm, val nonPlanar: Boolean) : DxfEntity
+    private data class DxfLine(val layer: String, val start: PointMm, val end: PointMm, val nonPlanar: Boolean, val openings: List<String> = emptyList()) : DxfEntity
     private data class DxfText(
         val layer: String,
         val text: String,

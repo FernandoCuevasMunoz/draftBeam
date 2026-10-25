@@ -31,6 +31,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -435,9 +436,16 @@ fun PlanPreview(
                     color = WALL_ORANGE.toArgb(),
                     strokeWidth = 1.dp.toPx()
                 )
-                // Both long edges of a wall with width are explicitly visible.
-                drawLine(color = lineColor, start = start, end = end, strokeWidth = strokeWidth)
-                PlanGeometry.wallCorners(segment).takeIf { it.size == 4 }?.let { corners ->
+                if (segment.openings.isNotEmpty()) {
+                    screenFootprints.forEach { polygon ->
+                        polygon.indices.forEach { edge ->
+                            drawLine(lineColor, polygon[edge], polygon[(edge + 1) % polygon.size], strokeWidth)
+                        }
+                    }
+                } else {
+                    // Both long edges of a wall with width are explicitly visible.
+                    drawLine(color = lineColor, start = start, end = end, strokeWidth = strokeWidth)
+                    PlanGeometry.wallCorners(segment).takeIf { it.size == 4 }?.let { corners ->
                     // Close both ends of the wall footprint, joining its long edges.
                     drawLine(
                         color = lineColor,
@@ -457,9 +465,27 @@ fun PlanPreview(
                         end = viewport.project(corners[2], size),
                         strokeWidth = strokeWidth
                     )
+                    }
                 }
             } else {
                 drawLine(color = lineColor, start = start, end = end, strokeWidth = strokeWidth)
+            }
+            segment.openings.forEach { opening ->
+                if (opening.kind == OpeningKind.WINDOW) {
+                    OpeningGeometry.windowLines(segment, opening).forEach { line ->
+                        drawLine(DraftBeamColors.LaserCyan, viewport.project(line.start, size),
+                            viewport.project(line.end, size), 2.dp.toPx())
+                    }
+                } else {
+                    val leaf = OpeningGeometry.doorLeaf(segment, opening)
+                    drawLine(lineColor, viewport.project(leaf.start, size), viewport.project(leaf.end, size), 2.dp.toPx())
+                    val arc = OpeningGeometry.doorArc(segment, opening).map { viewport.project(it, size) }
+                    val arcPath = Path().apply {
+                        moveTo(arc.first().x, arc.first().y)
+                        arc.drop(1).forEach { lineTo(it.x, it.y) }
+                    }
+                    drawPath(arcPath, lineColor.copy(alpha = 0.65f), style = Stroke(1.dp.toPx()))
+                }
             }
             paint.color = lineColor.toArgb()
             paint.textSize = dimensionTextSize
@@ -928,7 +954,9 @@ class PlanViewportState {
         if (canvasWidth <= 0f || canvasHeight <= 0f) return
 
         val segmentPoints = segments.flatMap { segment ->
-            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment)
+            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment) +
+                segment.openings.filter { it.kind == OpeningKind.DOOR }
+                    .flatMap { OpeningGeometry.doorArc(segment, it) }
         }
         val notePoints = notes.flatMap { note ->
             val width = note.textWidthMm

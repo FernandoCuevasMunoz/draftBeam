@@ -20,7 +20,7 @@ La investigación BLE detallada se conserva en notas personales externas que no 
 4. Elegir eje y sentido (`X+`, `X−`, `Y+`, `Y−`) para dibujar segmentos rectos de pared.
 5. Guardar/abrir proyectos y exportar el plano a DXF.
 
-La edición de secuencias muro–puerta–muro queda fuera de la primera versión.
+La edición paramétrica de puertas y ventanas 2D vinculadas a un muro es una ampliación posterior del primer MVP; aún no incluye alturas ni modelado 3D.
 
 ## Dominio y hallazgos confirmados
 
@@ -81,6 +81,7 @@ No asumir que el formato, UUID o comportamiento descritos aquí son exhaustivos.
 - Al editar un muro, si «Largo (mm)» tiene el foco, la siguiente lectura M130 válida reemplaza el contenido y se guarda automáticamente en ese muro, conservando ancho y lado actuales y cerrando la hoja; no agrega otro muro. Los campos conservan estilos tipográficos explícitos al cambiar el foco.
 - Tocar el cuerpo de un segmento lo selecciona; Editar abre la hoja para modificar largo, ancho y lado manualmente. Los vértices celestes solo se muestran para el muro seleccionado. Las lecturas M130 válidas agregan muros nuevos, no reemplazan muros existentes.
 - Editar o borrar un segmento solo cambia esa entidad; otras líneas conservan sus coordenadas.
+- En `feature/doors-windows`, un muro con ancho admite vanos 2D editables de puerta o ventana sin superposición. El largo del vano determina exactamente el largo de la hoja de puerta (800 mm → 800 mm); su hoja abierta muestra bisagra, sentido y arco de giro. La ventana permanece cerrada con marco visible y ancho entre las caras del muro. Se puede centrar el vano o indicar distancia desde cada extremo; la bisagra/marco se centra o se alinea con una cara. El hueco recorta el contorno y hatch del muro; ediciones que dejarían un vano fuera de sus límites se rechazan. Deshacer, borrador privado (formato 2 compatible con borradores v1) y DXF de la app conservan los vanos: el DXF usa geometría visible estándar (LINE y ARC para puertas) más metadatos XDATA en el eje oculto para reimportarlos. Los DXF externos no permiten inferir puertas/ventanas arbitrarias automáticamente; se necesita verificación en LibreCAD y Android.
 - El plano con cambios sin guardar se autoguarda cada 60 segundos mientras la actividad está en primer plano, solo si cambió desde el último borrador; la escritura periódica usa un hilo dedicado y `AtomicFile` privado, sin modificar el DXF. También se guarda al salir o recrearse la actividad. Al guardar/importar se borra el borrador y se descartan escrituras periódicas anteriores; el siguiente inicio limpio lee el DXF vigente (incluidos cambios externos). El historial Deshacer no se conserva entre procesos. El borrador queda excluido de las copias de seguridad Android. Un proyecto nativo gestionado por el usuario sigue pendiente. La exportación/importación DXF está implementada, pero aún debe probarse en un dispositivo y abrirse en LibreCAD para confirmar visualmente la compatibilidad.
 
 ## Restricciones y seguridad
