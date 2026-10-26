@@ -33,6 +33,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -95,6 +96,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
@@ -116,6 +118,7 @@ import java.util.UUID
 import java.io.File
 import java.io.FileNotFoundException
 import java.util.concurrent.Executors
+import kotlin.math.hypot
 
 private data class PlanSnapshot(
     val segments: List<WallSegment>,
@@ -515,6 +518,12 @@ class MainActivity : ComponentActivity() {
                     onSaveWallProperties = { index, length, width, side ->
                         updateWallProperties(index, length, width, side).also { status.value = it }
                     },
+                    onSaveOpening = { index, existingIndex, opening ->
+                        saveOpening(index, existingIndex, opening).also { status.value = it }
+                    },
+                    onDeleteOpening = { index, openingIndex ->
+                        deleteOpening(index, openingIndex).also { status.value = it }
+                    },
                     onNewLengthFieldFocusChanged = { newLengthFieldFocused.value = it },
                     onLengthMeasurementConsumed = { eventId ->
                         if (lengthMeasurementEvent.value?.id == eventId) lengthMeasurementEvent.value = null
@@ -741,6 +750,7 @@ class MainActivity : ComponentActivity() {
                 destination = move.destination,
                 moveConnectedEndpoints = moveConnected
             )
+            updatedSegments.forEach(PlanGeometry::validateOpenings)
             if (updatedSegments != before) {
                 pushPlanSnapshot()
                 wallSegments.clear()
@@ -766,6 +776,7 @@ class MainActivity : ComponentActivity() {
             val previousEnd = before.getOrNull(index)?.end
             val withNewLength = PlanGeometry.updateSegmentLength(before, index, lengthMm)
             val updatedSegments = PlanGeometry.updateSegmentWall(withNewLength, index, widthMm, side)
+            updatedSegments.forEach(PlanGeometry::validateOpenings)
             if (updatedSegments != before) pushPlanSnapshot()
             wallSegments.clear()
             wallSegments.addAll(updatedSegments)
@@ -776,6 +787,32 @@ class MainActivity : ComponentActivity() {
         } catch (exception: IllegalArgumentException) {
             exception.message ?: "No se pudo actualizar el muro."
         }
+    }
+
+    private fun saveOpening(wallIndex: Int, openingIndex: Int?, opening: WallOpening): String {
+        val wall = wallSegments.getOrNull(wallIndex) ?: return "El muro seleccionado ya no existe."
+        return try {
+            val updated = wall.copy(openings = if (openingIndex == null) wall.openings + opening else {
+                require(openingIndex in wall.openings.indices) { "El vano seleccionado ya no existe." }
+                wall.openings.toMutableList().apply { set(openingIndex, opening) }
+            })
+            PlanGeometry.validateOpenings(updated)
+            if (wall != updated) {
+                pushPlanSnapshot()
+                wallSegments[wallIndex] = updated
+            }
+            if (opening.kind == OpeningKind.DOOR) "Puerta de ${opening.lengthMm} mm guardada." else "Ventana guardada."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo guardar el vano."
+        }
+    }
+
+    private fun deleteOpening(wallIndex: Int, openingIndex: Int): String {
+        val wall = wallSegments.getOrNull(wallIndex) ?: return "El muro seleccionado ya no existe."
+        if (openingIndex !in wall.openings.indices) return "El vano seleccionado ya no existe."
+        pushPlanSnapshot()
+        wallSegments[wallIndex] = wall.copy(openings = wall.openings.filterIndexed { index, _ -> index != openingIndex })
+        return "Vano eliminado; puedes deshacer esta acción."
     }
 
     private fun saveDxf(uri: Uri, associateDocument: Boolean = false): Boolean {
@@ -1174,6 +1211,8 @@ fun DraftBeamScreen(
     onDismissEndpointMove: () -> Unit,
     onStartPointSelected: (PointMm) -> Unit,
     onSaveWallProperties: (Int, Long, Long, WallGrowthSide) -> String,
+    onSaveOpening: (Int, Int?, WallOpening) -> String,
+    onDeleteOpening: (Int, Int) -> String,
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismissWallEditor: () -> Unit,
@@ -1192,6 +1231,7 @@ fun DraftBeamScreen(
     var overflowMenuExpanded by remember { mutableStateOf(false) }
     var pendingConnection by remember { mutableStateOf<PendingConnection?>(null) }
     var showNewWallSheet by remember { mutableStateOf(false) }
+    var openingEditor by remember { mutableStateOf<Pair<OpeningKind, Int?>?>(null) }
     var focusWallWidth by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
     var noteEditIndex by remember { mutableStateOf<Int?>(null) }
@@ -1784,11 +1824,43 @@ fun DraftBeamScreen(
             onLengthMeasurementConsumed = onLengthMeasurementConsumed,
             onDismiss = onDismissWallEditor,
             onSaveWall = { lengthMm, widthMm, side ->
-                onSaveWallProperties(selectedWallIndex, lengthMm, widthMm, side)
-                onDismissWallEditor()
+                val result = onSaveWallProperties(selectedWallIndex, lengthMm, widthMm, side)
+                if (result.startsWith("Muro actualizado")) onDismissWallEditor()
+                result
             },
+            onAddOpening = { kind ->
+                onDismissWallEditor()
+                openingEditor = kind to null
+            },
+            onEditOpening = { openingIndex ->
+                onDismissWallEditor()
+                openingEditor = editingSegment.openings[openingIndex].kind to openingIndex
+            },
+            onDeleteOpening = { openingIndex -> onDeleteOpening(selectedWallIndex, openingIndex) },
             onDelete = onDeleteWallClick
         )
+    }
+
+    openingEditor?.let { (kind, openingIndex) ->
+        val wallIndex = selectedWallIndex
+        val wall = wallIndex?.let(wallSegments::getOrNull)
+        if (wallIndex == null || wall == null) {
+            openingEditor = null
+        } else {
+            OpeningEditorDialog(
+                wall = wall,
+                kind = kind,
+                existing = openingIndex?.let(wall.openings::getOrNull),
+                onDismiss = { openingEditor = null },
+                onSave = { opening ->
+                    val result = onSaveOpening(wallIndex, openingIndex, opening)
+                    if (result.startsWith("Puerta") || result.startsWith("Ventana")) {
+                        openingEditor = null
+                        null
+                    } else result
+                }
+            )
+        }
     }
 
     if (showNewWallSheet) {
@@ -1972,7 +2044,10 @@ private fun WallEditorSheet(
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismiss: () -> Unit,
-    onSaveWall: (Long, Long, WallGrowthSide) -> Unit,
+    onSaveWall: (Long, Long, WallGrowthSide) -> String,
+    onAddOpening: (OpeningKind) -> Unit,
+    onEditOpening: (Int) -> Unit,
+    onDeleteOpening: (Int) -> Unit,
     onDelete: () -> Unit
 ) {
     var lengthText by remember(index, segment.lengthMm) { mutableStateOf("") }
@@ -1987,7 +2062,8 @@ private fun WallEditorSheet(
     LaunchedEffect(lengthMeasurementEvent?.id) {
         lengthMeasurementEvent?.let { event ->
             onLengthMeasurementConsumed(event.id)
-            onSaveWall(event.millimeters, segment.widthMm, segment.growthSide)
+            val result = onSaveWall(event.millimeters, segment.widthMm, segment.growthSide)
+            if (!result.startsWith("Muro actualizado")) validationError = result
         }
     }
 
@@ -2072,6 +2148,22 @@ private fun WallEditorSheet(
                 }
             }
 
+            Text("Puertas y ventanas", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { onAddOpening(OpeningKind.DOOR) }, enabled = segment.widthMm > 0,
+                    modifier = Modifier.weight(1f)) { Text("Agregar puerta") }
+                OutlinedButton(onClick = { onAddOpening(OpeningKind.WINDOW) }, enabled = segment.widthMm > 0,
+                    modifier = Modifier.weight(1f)) { Text("Agregar ventana") }
+            }
+            segment.openings.forEachIndexed { openingIndex, opening ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("${if (opening.kind == OpeningKind.DOOR) "Puerta" else "Ventana"} ${opening.lengthMm} mm · ${opening.offsetMm} mm",
+                        modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { onEditOpening(openingIndex) }) { Text("Editar") }
+                    TextButton(onClick = { onDeleteOpening(openingIndex) }) { Text("Quitar") }
+                }
+            }
+
             validationError?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
@@ -2104,7 +2196,8 @@ private fun WallEditorSheet(
                         } else if (width == null || width < 0) {
                             validationError = "Ingresa un ancho de cero o más milímetros."
                         } else {
-                            onSaveWall(length, width, growthSide)
+                            val result = onSaveWall(length, width, growthSide)
+                            if (!result.startsWith("Muro actualizado")) validationError = result
                         }
                     },
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp),
@@ -2118,6 +2211,143 @@ private fun WallEditorSheet(
             }
         }
     }
+}
+
+@Composable
+private fun OpeningEditorDialog(
+    wall: WallSegment,
+    kind: OpeningKind,
+    existing: WallOpening?,
+    onDismiss: () -> Unit,
+    onSave: (WallOpening) -> String?
+) {
+    var lengthText by remember(existing) { mutableStateOf(existing?.lengthMm?.toString() ?: "800") }
+    var frameText by remember(existing) { mutableStateOf(existing?.frameWidthMm?.toString() ?: (wall.widthMm / 2).coerceAtLeast(1).toString()) }
+    var position by remember(existing) { mutableStateOf(if (existing == null) 0 else 1) }
+    var distanceText by remember(existing) { mutableStateOf(existing?.offsetMm?.toString() ?: "0") }
+    var alignment by remember(existing) { mutableStateOf(existing?.alignment ?: OpeningAlignment.CENTER) }
+    var hingeAtStart by remember(existing) { mutableStateOf(existing?.hingeAtStart ?: true) }
+    var swingTowardWall by remember(existing) { mutableStateOf(existing?.swingTowardWall ?: false) }
+    var angleText by remember(existing) { mutableStateOf(existing?.openingAngleDegrees?.toString() ?: "90") }
+    var error by remember(existing) { mutableStateOf<String?>(null) }
+    val wallLength = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
+    val length = lengthText.toLongOrNull()
+    val distance = distanceText.toLongOrNull()
+    val frame = if (kind == OpeningKind.WINDOW) frameText.toLongOrNull() else 0L
+    val angle = if (kind == OpeningKind.DOOR) angleText.toIntOrNull() else 90
+    val candidate = if (length != null && distance != null && frame != null && angle != null) {
+        val offset = when (position) {
+            0 -> ((wallLength - length) / 2.0).toLong()
+            1 -> distance
+            else -> (wallLength - length - distance).toLong()
+        }
+        WallOpening(kind, offset, length, alignment, frame, hingeAtStart, swingTowardWall, angle)
+    } else null
+    val preview = candidate?.takeIf { opening ->
+        runCatching {
+            PlanGeometry.validateOpenings(wall.copy(openings =
+                wall.openings.filterNot { it === existing } + opening))
+        }.isSuccess
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (kind == OpeningKind.DOOR) "Puerta 2D" else "Ventana 2D") },
+        text = {
+            Column(modifier = Modifier.heightIn(max = 470.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Muro: ${wallLength.toLong()} mm de largo × ${wall.widthMm} mm entre caras.")
+                Text("Vista previa 2D", style = MaterialTheme.typography.labelLarge)
+                Canvas(modifier = Modifier.fillMaxWidth().height(110.dp)) {
+                    drawRect(DraftBeamColors.BackgroundDeep)
+                    val visible = preview ?: return@Canvas
+                    val span = maxOf(visible.lengthMm.toDouble(), wall.widthMm.toDouble())
+                    val scale = minOf(size.width / wallLength.toFloat(), size.height / (wall.widthMm + span * 2).toFloat()) * 0.9f
+                    val left = (size.width - wallLength * scale).toFloat() / 2f
+                    val midY = size.height / 2f
+                    fun point(world: PointMm) = Offset(left + world.x.toFloat() * scale,
+                        midY - world.y.toFloat() * scale)
+                    PlanGeometry.solidRanges(wall.copy(openings = listOf(visible))).forEach { (from, to) ->
+                        val a = point(PointMm(from, wall.widthMm.toDouble()))
+                        val b = point(PointMm(to, 0.0))
+                        drawRect(DraftBeamColors.SurfaceElevated, a,
+                            androidx.compose.ui.geometry.Size(b.x - a.x, b.y - a.y))
+                    }
+                    val previewWall = wall.copy(start = PointMm(0.0, 0.0),
+                        end = PointMm(wallLength, 0.0), growthSide = WallGrowthSide.LEFT)
+                    if (visible.kind == OpeningKind.WINDOW) {
+                        OpeningGeometry.windowLines(previewWall, visible).forEach { line ->
+                            drawLine(DraftBeamColors.LaserCyan, point(line.start), point(line.end), 2.dp.toPx())
+                        }
+                    } else {
+                        val leaf = OpeningGeometry.doorLeaf(previewWall, visible)
+                        drawLine(DraftBeamColors.LaserCyan, point(leaf.start), point(leaf.end), 2.dp.toPx())
+                        OpeningGeometry.doorArc(previewWall, visible).zipWithNext().forEach { (a, b) ->
+                            drawLine(DraftBeamColors.LaserCyan, point(a), point(b), 1.dp.toPx())
+                        }
+                    }
+                }
+                OutlinedTextField(value = lengthText, onValueChange = { lengthText = it.filter(Char::isDigit); error = null },
+                    label = { Text("Largo del vano (mm)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (kind == OpeningKind.WINDOW) {
+                    OutlinedTextField(value = frameText, onValueChange = { frameText = it.filter(Char::isDigit); error = null },
+                        label = { Text("Ancho del marco (mm)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                } else {
+                    Text("La hoja mide exactamente lo mismo que el vano; se representa abierta.")
+                }
+                Text("Posición a lo largo del muro")
+                listOf("Centro", "Desde inicio", "Desde final").forEachIndexed { index, label ->
+                    OutlinedButton(onClick = { position = index }, modifier = Modifier.fillMaxWidth(),
+                        border = if (position == index) BorderStroke(2.dp, DraftBeamColors.Primary) else null) { Text(label) }
+                }
+                if (position != 0) {
+                    OutlinedTextField(value = distanceText, onValueChange = { distanceText = it.filter(Char::isDigit); error = null },
+                        label = { Text("Distancia al extremo (mm)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+                Text("Posición entre las dos caras")
+                OpeningAlignment.entries.forEach { option ->
+                    OutlinedButton(onClick = { alignment = option }, modifier = Modifier.fillMaxWidth(),
+                        border = if (alignment == option) BorderStroke(2.dp, DraftBeamColors.Primary) else null) {
+                        Text(when (option) {
+                            OpeningAlignment.CENTER -> "Centrada"
+                            OpeningAlignment.NEAR_FACE -> "Cara base"
+                            OpeningAlignment.FAR_FACE -> "Cara opuesta"
+                        })
+                    }
+                }
+                if (kind == OpeningKind.DOOR) {
+                    Text("Bisagra")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { hingeAtStart = true }, modifier = Modifier.weight(1f),
+                            border = if (hingeAtStart) BorderStroke(2.dp, DraftBeamColors.Primary) else null) { Text("Inicio") }
+                        OutlinedButton(onClick = { hingeAtStart = false }, modifier = Modifier.weight(1f),
+                            border = if (!hingeAtStart) BorderStroke(2.dp, DraftBeamColors.Primary) else null) { Text("Final") }
+                    }
+                    Text("Sentido de apertura")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { swingTowardWall = false }, modifier = Modifier.weight(1f),
+                            border = if (!swingTowardWall) BorderStroke(2.dp, DraftBeamColors.Primary) else null) { Text("Cara base") }
+                        OutlinedButton(onClick = { swingTowardWall = true }, modifier = Modifier.weight(1f),
+                            border = if (swingTowardWall) BorderStroke(2.dp, DraftBeamColors.Primary) else null) { Text("Cara opuesta") }
+                    }
+                    OutlinedTextField(value = angleText, onValueChange = { angleText = it.filter(Char::isDigit); error = null },
+                        label = { Text("Ángulo de apertura (°)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (candidate == null) error = "Ingresa medidas válidas."
+                else error = onSave(candidate)
+            }) { Text("Guardar") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

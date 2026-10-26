@@ -14,7 +14,7 @@ data class PlanSession(
 )
 
 object PlanSessionCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val MAX_ITEMS = 100_000
 
     fun encode(session: PlanSession): ByteArray {
@@ -28,12 +28,25 @@ object PlanSessionCodec {
             session.selectedStartPoint?.let { output.writePoint(it) }
             output.writeInt(session.segments.size)
             session.segments.forEach { segment ->
+                PlanGeometry.validateOpenings(segment)
+                require(segment.openings.size <= 1000) { "Demasiados vanos en el borrador." }
                 output.writePoint(segment.start)
                 output.writePoint(segment.end)
                 output.writeLong(segment.lengthMm)
                 output.writeDouble(segment.angleDegrees)
                 output.writeLong(segment.widthMm)
                 output.writeInt(segment.growthSide.ordinal)
+                output.writeInt(segment.openings.size)
+                segment.openings.forEach { opening ->
+                    output.writeInt(opening.kind.ordinal)
+                    output.writeLong(opening.offsetMm)
+                    output.writeLong(opening.lengthMm)
+                    output.writeInt(opening.alignment.ordinal)
+                    output.writeLong(opening.frameWidthMm)
+                    output.writeBoolean(opening.hingeAtStart)
+                    output.writeBoolean(opening.swingTowardWall)
+                    output.writeInt(opening.openingAngleDegrees)
+                }
             }
             output.writeInt(session.notes.size)
             session.notes.forEach { note ->
@@ -47,18 +60,28 @@ object PlanSessionCodec {
     }
 
     fun decode(bytes: ByteArray): PlanSession = DataInputStream(ByteArrayInputStream(bytes)).use { input ->
-        require(input.readInt() == VERSION) { "Versión de sesión desconocida." }
+        val version = input.readInt()
+        require(version in 1..VERSION) { "Versión de sesión desconocida." }
         val uri = if (input.readBoolean()) input.readUTF() else null
         val selected = if (input.readBoolean()) input.readPoint() else null
         val segments = List(input.readCount()) {
+            val start = input.readPoint()
+            val end = input.readPoint()
+            val length = input.readLong()
+            val angle = input.readDouble()
+            val width = input.readLong()
+            val side = WallGrowthSide.entries[input.readSide()]
+            val openings = if (version == 1) emptyList() else List(input.readCount().also {
+                require(it <= 1000) { "Demasiados vanos en el borrador." }
+            }) {
+                WallOpening(OpeningKind.entries[input.readOpeningKind()], input.readLong(), input.readLong(),
+                    OpeningAlignment.entries[input.readOpeningAlignment()], input.readLong(), input.readBoolean(),
+                    input.readBoolean(), input.readInt())
+            }
             WallSegment(
-                start = input.readPoint(),
-                end = input.readPoint(),
-                lengthMm = input.readLong(),
-                angleDegrees = input.readDouble(),
-                widthMm = input.readLong(),
-                growthSide = WallGrowthSide.entries[input.readSide()]
-            )
+                start = start, end = end, lengthMm = length, angleDegrees = angle,
+                widthMm = width, growthSide = side, openings = openings
+            ).also(PlanGeometry::validateOpenings)
         }
         val notes = List(input.readCount()) {
             PlanNote(input.readUTF(), input.readPoint(), input.readDouble(), input.readDouble())
@@ -82,5 +105,13 @@ object PlanSessionCodec {
 
     private fun DataInputStream.readSide(): Int = readInt().also {
         require(it in WallGrowthSide.entries.indices) { "Lado de muro inválido." }
+    }
+
+    private fun DataInputStream.readOpeningKind(): Int = readInt().also {
+        require(it in OpeningKind.entries.indices) { "Tipo de vano inválido." }
+    }
+
+    private fun DataInputStream.readOpeningAlignment(): Int = readInt().also {
+        require(it in OpeningAlignment.entries.indices) { "Alineación de vano inválida." }
     }
 }

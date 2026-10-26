@@ -47,7 +47,23 @@ data class WallSegment(
     val lengthMm: Long,
     val angleDegrees: Double,
     val widthMm: Long = 0L,
-    val growthSide: WallGrowthSide = WallGrowthSide.LEFT
+    val growthSide: WallGrowthSide = WallGrowthSide.LEFT,
+    val openings: List<WallOpening> = emptyList()
+)
+
+enum class OpeningKind { DOOR, WINDOW }
+enum class OpeningAlignment { CENTER, NEAR_FACE, FAR_FACE }
+
+/** Distances are local to the wall's start and near face, independent of its world angle. */
+data class WallOpening(
+    val kind: OpeningKind,
+    val offsetMm: Long,
+    val lengthMm: Long,
+    val alignment: OpeningAlignment = OpeningAlignment.CENTER,
+    val frameWidthMm: Long = 0L,
+    val hingeAtStart: Boolean = true,
+    val swingTowardWall: Boolean = false,
+    val openingAngleDegrees: Int = 90
 )
 
 data class PlanNote(
@@ -238,7 +254,8 @@ object PlanGeometry {
             if (segmentIndex == index) {
                 segmentFromLength(segment.start, segment.angleDegrees, newLengthMm).copy(
                     widthMm = segment.widthMm,
-                    growthSide = segment.growthSide
+                    growthSide = segment.growthSide,
+                    openings = segment.openings
                 )
             } else {
                 segment
@@ -333,7 +350,11 @@ object PlanGeometry {
     fun wallFootprints(segments: List<WallSegment>): List<List<List<PointMm>>> =
         segments.mapIndexed { index, segment ->
             if (segment.widthMm <= 0L) return@mapIndexed emptyList()
-            var pieces = listOf(wallCorners(segment))
+            var pieces = solidRanges(segment).map { (from, to) ->
+                listOf(wallPoint(segment, from), wallPoint(segment, to),
+                    wallPoint(segment, to, segment.widthMm.toDouble()),
+                    wallPoint(segment, from, segment.widthMm.toDouble()))
+            }
             segments.forEachIndexed { otherIndex, other ->
                 if (index == otherIndex || other.widthMm <= 0L || !shareEndpoint(segment, other)) {
                     return@forEachIndexed
@@ -347,6 +368,55 @@ object PlanGeometry {
             }
             pieces
         }
+
+    fun wallPoint(segment: WallSegment, alongMm: Double, acrossMm: Double = 0.0): PointMm {
+        val dx = segment.end.x - segment.start.x
+        val dy = segment.end.y - segment.start.y
+        val length = hypot(dx, dy)
+        require(length > 0.0) { "El muro no tiene longitud." }
+        val side = if (segment.growthSide == WallGrowthSide.LEFT) 1.0 else -1.0
+        return PointMm(segment.start.x + dx / length * alongMm - dy / length * acrossMm * side,
+            segment.start.y + dy / length * alongMm + dx / length * acrossMm * side)
+    }
+
+    fun solidRanges(segment: WallSegment): List<Pair<Double, Double>> {
+        val length = hypot(segment.end.x - segment.start.x, segment.end.y - segment.start.y)
+        var start = 0.0
+        val ranges = mutableListOf<Pair<Double, Double>>()
+        segment.openings.sortedBy { it.offsetMm }.forEach { opening ->
+            if (opening.offsetMm > start) ranges += start to opening.offsetMm.toDouble()
+            start = opening.offsetMm.toDouble() + opening.lengthMm
+        }
+        if (start < length) ranges += start to length
+        return ranges
+    }
+
+    fun frameOffset(segment: WallSegment, opening: WallOpening): Double = when (opening.alignment) {
+        OpeningAlignment.NEAR_FACE -> 0.0
+        OpeningAlignment.FAR_FACE -> (segment.widthMm - opening.frameWidthMm).toDouble()
+        OpeningAlignment.CENTER -> (segment.widthMm - opening.frameWidthMm) / 2.0
+    }
+
+    fun validateOpenings(segment: WallSegment) {
+        require(segment.openings.isEmpty() || segment.widthMm > 0L) { "Los vanos requieren un muro con ancho." }
+        require(segment.openings.size <= 1000) { "El muro contiene demasiados vanos." }
+        val length = hypot(segment.end.x - segment.start.x, segment.end.y - segment.start.y)
+        var previousEnd = 0.0
+        segment.openings.sortedBy { it.offsetMm }.forEach { opening ->
+            require(opening.lengthMm > 0 && opening.offsetMm >= 0 &&
+                opening.lengthMm < length && opening.offsetMm.toDouble() + opening.lengthMm <= length + 1e-6) {
+                "El vano debe caber dentro del muro."
+            }
+            require(opening.offsetMm >= previousEnd - 1e-6) { "Los vanos no pueden superponerse." }
+            require(opening.frameWidthMm >= 0 && opening.frameWidthMm <= segment.widthMm &&
+                (opening.kind != OpeningKind.WINDOW || opening.frameWidthMm > 0) &&
+                (opening.kind != OpeningKind.DOOR || opening.frameWidthMm == 0L)) {
+                "El ancho de la ventana debe caber entre las caras del muro."
+            }
+            require(opening.openingAngleDegrees in 1..180) { "El ángulo de apertura debe estar entre 1° y 180°." }
+            previousEnd = opening.offsetMm.toDouble() + opening.lengthMm
+        }
+    }
 
     private fun shareEndpoint(first: WallSegment, second: WallSegment): Boolean =
         first.start == second.start || first.start == second.end ||

@@ -1,10 +1,36 @@
 package cl.fernandocuevas.draftbeam
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DxfCodecTest {
+    @Test
+    fun doorsAndWindowsRoundTripWithoutTurningGraphicsIntoExtraWalls() {
+        val openings = listOf(
+            WallOpening(OpeningKind.DOOR, 0, 800, OpeningAlignment.CENTER, hingeAtStart = false,
+                swingTowardWall = true, openingAngleDegrees = 90),
+            WallOpening(OpeningKind.WINDOW, 1_200, 1_000, OpeningAlignment.FAR_FACE, frameWidthMm = 60)
+        )
+        val wall = WallSegment(PointMm(0.0, 0.0), PointMm(4_000.0, 0.0), 4_000, 0.0, 200,
+            WallGrowthSide.LEFT, openings)
+
+        val dxf = DxfCodec.encode(listOf(wall))
+        val imported = DxfCodec.decode(dxf)
+
+        assertEquals(listOf(wall), imported.segments)
+        assertTrue(imported.warnings.isEmpty())
+        assertTrue(dxf.contains("\n1001\nDRAFTBEAM\n1000\nDBO1;DOOR;0;800"))
+        assertTrue(dxf.contains("\nFDXL_VISIBLE_0001\n"))
+        assertTrue(dxf.contains("\n62\n-5\n")) // full reconstruction axis is hidden in CAD
+        assertTrue(dxf.contains("\nFDXL_OPENINGS\n"))
+        assertEquals("800", entitiesOfType(dxf, "ARC").single()[40])
+        assertThrows(IllegalArgumentException::class.java) {
+            DxfCodec.decode(dxf.replace("DBO1;DOOR;0;800", "DBO1;DOOR;0;999999"))
+        } // never silently replace a corrupted opening with solid wall
+    }
+
     @Test
     fun alignedDimensionUsesIntegerMillimetersAndSitsBesideContinuousDimensionLine() {
         val segment = WallSegment(
