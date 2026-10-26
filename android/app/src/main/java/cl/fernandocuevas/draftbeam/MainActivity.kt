@@ -24,6 +24,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import android.util.AtomicFile
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -111,11 +113,16 @@ import androidx.compose.ui.window.DialogProperties
 import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamTheme
 import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamColors
 import java.util.UUID
+import java.io.File
+import java.io.FileNotFoundException
+import java.util.concurrent.Executors
 
 private data class PlanSnapshot(
     val segments: List<WallSegment>,
     val notes: List<PlanNote>,
-    val selectedStartPoint: PointMm?
+    val selectedStartPoint: PointMm?,
+    val documentUri: Uri?,
+    val restoresDocument: Boolean
 )
 
 private data class PendingConnection(
@@ -133,20 +140,21 @@ data class PendingEndpointMove(
 
 data class LengthMeasurement(val id: Int, val millimeters: Long)
 
-private class CreateDxfInDownloads : ActivityResultContract<String, Uri?>() {
+private class CreateDxfDocument : ActivityResultContract<String, Uri?>() {
     override fun createIntent(context: Context, input: String): Intent =
         Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "application/dxf"
             putExtra(Intent.EXTRA_TITLE, input)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                putExtra(
-                    DocumentsContract.EXTRA_INITIAL_URI,
-                    DocumentsContract.buildDocumentUri(
-                        "com.android.externalstorage.documents",
-                        "primary:Download"
-                    )
-                )
+                // A document URI is only a hint: the provider may choose a different folder.
+                val last = context.getSharedPreferences(DXF_PREFERENCES, Context.MODE_PRIVATE)
+                    .getString(DXF_LAST_LOCATION_KEY, null)?.let(Uri::parse)
+                if (last != null && context.contentResolver.persistedUriPermissions.any {
+                        it.uri == last && it.isReadPermission
+                    }) {
+                    putExtra(DocumentsContract.EXTRA_INITIAL_URI, last)
+                }
             }
         }
 
@@ -174,14 +182,37 @@ class MainActivity : ComponentActivity() {
     private val selectedDeviceName = mutableStateOf<String?>(null)
     private val connectingDeviceName = mutableStateOf<String?>(null)
     private val dxfImportRevision = mutableIntStateOf(0)
+    private val recentDxfPlans = mutableStateListOf<RecentDxfPlan>()
     private var currentDxfUri: Uri? = null
+    private val draftGate = DraftSaveGate()
+    private val draftExecutor = Executors.newSingleThreadExecutor()
 
     private val bluetoothAdapter by lazy {
         (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
     }
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val periodicDraftSave = object : Runnable {
+        override fun run() {
+            val token = draftGate.pending()
+            if (token != null) {
+                val session = currentPlanSession()
+                draftExecutor.execute {
+                    try {
+                        draftGate.write(token) { writePlanSession(session) }
+                    } catch (exception: Exception) {
+                        mainHandler.post {
+                            if (draftGate.pending() == token) {
+                                status.value = "No se pudo conservar el borrador: ${exception.message ?: "error de almacenamiento"}"
+                            }
+                        }
+                    }
+                }
+            }
+            mainHandler.postDelayed(this, DRAFT_SAVE_INTERVAL_MS)
+        }
+    }
     private var scanner: BluetoothLeScanner? = null
-    private var connectedGatt: BluetoothGatt? = null
+    @Volatile private var connectedGatt: BluetoothGatt? = null
 
     private val stopScanRunnable = Runnable { stopScan("Búsqueda finalizada.") }
 
@@ -210,8 +241,13 @@ class MainActivity : ComponentActivity() {
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, statusCode: Int, newState: Int) {
+            if (connectedGatt !== gatt) {
+                gatt.close()
+                return
+            }
             if (statusCode != BluetoothGatt.GATT_SUCCESS) {
                 runOnUiThread {
+                    if (connectedGatt !== gatt) return@runOnUiThread
                     status.value = "Error de conexión GATT: $statusCode."
                     selectedDeviceName.value = null
                     connectingDeviceName.value = null
@@ -223,13 +259,16 @@ class MainActivity : ComponentActivity() {
 
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    runOnUiThread { status.value = "Conectado a ${connectingDeviceName.value ?: "medidor"}. Buscando características BLE…" }
+                    runOnUiThread {
+                        if (connectedGatt === gatt) status.value = "Conectado a ${connectingDeviceName.value ?: "medidor"}. Buscando características BLE…"
+                    }
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     gatt.close()
                     if (connectedGatt === gatt) connectedGatt = null
                     runOnUiThread {
+                        if (connectedGatt != null && connectedGatt !== gatt) return@runOnUiThread
                         selectedDeviceName.value = null
                         connectingDeviceName.value = null
                         status.value = "Desconectado del medidor."
@@ -240,12 +279,9 @@ class MainActivity : ComponentActivity() {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, statusCode: Int) {
+            if (connectedGatt !== gatt) return
             if (statusCode != BluetoothGatt.GATT_SUCCESS) {
-                runOnUiThread {
-                    selectedDeviceName.value = null
-                    connectingDeviceName.value = null
-                    status.value = "No se pudieron descubrir los servicios BLE."
-                }
+                abandonGatt(gatt, "No se pudieron descubrir los servicios BLE.")
                 return
             }
 
@@ -254,22 +290,14 @@ class MainActivity : ComponentActivity() {
                 ?.getCharacteristic(MEASUREMENT_CHARACTERISTIC_UUID)
 
             if (characteristic == null) {
-                runOnUiThread {
-                    selectedDeviceName.value = null
-                    connectingDeviceName.value = null
-                    status.value = "No se encontró la característica de medición FFB2."
-                }
+                abandonGatt(gatt, "No se encontró la característica de medición FFB2.")
                 return
             }
 
             val notificationEnabled = gatt.setCharacteristicNotification(characteristic, true)
             val descriptor = characteristic.getDescriptor(CCCD_UUID)
             if (!notificationEnabled || descriptor == null) {
-                runOnUiThread {
-                    selectedDeviceName.value = null
-                    connectingDeviceName.value = null
-                    status.value = "No se pudo preparar la suscripción a FFB2."
-                }
+                abandonGatt(gatt, "No se pudo preparar la suscripción a FFB2.")
                 return
             }
 
@@ -284,11 +312,7 @@ class MainActivity : ComponentActivity() {
             }
 
             if (!writeStarted) {
-                runOnUiThread {
-                    selectedDeviceName.value = null
-                    connectingDeviceName.value = null
-                    status.value = "No se pudo activar la notificación de FFB2."
-                }
+                abandonGatt(gatt, "No se pudo activar la notificación de FFB2.")
             }
         }
 
@@ -297,8 +321,9 @@ class MainActivity : ComponentActivity() {
             descriptor: BluetoothGattDescriptor,
             statusCode: Int
         ) {
-            if (descriptor.uuid == CCCD_UUID) {
+            if (connectedGatt === gatt && descriptor.uuid == CCCD_UUID) {
                 runOnUiThread {
+                    if (connectedGatt !== gatt) return@runOnUiThread
                     status.value = if (statusCode == BluetoothGatt.GATT_SUCCESS) {
                         selectedDeviceName.value = connectingDeviceName.value ?: "Medidor BLE"
                         connectingDeviceName.value = null
@@ -309,6 +334,7 @@ class MainActivity : ComponentActivity() {
                         "Falló la suscripción a FFB2 (código $statusCode)."
                     }
                 }
+                if (statusCode != BluetoothGatt.GATT_SUCCESS) abandonGatt(gatt, "Falló la suscripción a FFB2 (código $statusCode).")
             }
         }
 
@@ -319,7 +345,7 @@ class MainActivity : ComponentActivity() {
         ) {
             @Suppress("DEPRECATION")
             val value = characteristic.value?.copyOf() ?: return
-            onMeasurementNotification(characteristic, value)
+            onMeasurementNotification(gatt, characteristic, value)
         }
 
         override fun onCharacteristicChanged(
@@ -327,18 +353,20 @@ class MainActivity : ComponentActivity() {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            onMeasurementNotification(characteristic, value.copyOf())
+            onMeasurementNotification(gatt, characteristic, value.copyOf())
         }
     }
 
     private fun onMeasurementNotification(
+        gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray
     ) {
-        if (characteristic.uuid != MEASUREMENT_CHARACTERISTIC_UUID) return
+        if (connectedGatt !== gatt || characteristic.uuid != MEASUREMENT_CHARACTERISTIC_UUID) return
         val hex = value.joinToString(" ") { byte -> "%02X".format(byte.toInt() and 0xFF) }
         val decoded = MeasurementParser.parse(value)
         runOnUiThread {
+            if (connectedGatt !== gatt || selectedDeviceName.value == null) return@runOnUiThread
             latestMeasurementMm.value = (decoded as? MeasurementParseResult.Success)?.millimeters
             notifications.add(
                 0,
@@ -368,10 +396,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun abandonGatt(gatt: BluetoothGatt, message: String) {
+        if (connectedGatt !== gatt) return
+        connectedGatt = null
+        try {
+            gatt.disconnect()
+        } catch (_: SecurityException) {
+            // Android may revoke Bluetooth permission while the connection is closing.
+        } finally {
+            gatt.close()
+        }
+        runOnUiThread {
+            if (connectedGatt != null) return@runOnUiThread
+            selectedDeviceName.value = null
+            connectingDeviceName.value = null
+            status.value = message
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (savedInstanceState == null) restoreLastOpenedDxf()
+        recentDxfPlans.addAll(readRecentDxfPlans())
+        if (!restorePlanSession()) restoreLastOpenedDxf()
+        undoHistory.clear()
 
         setContent {
             DraftBeamTheme {
@@ -381,7 +430,7 @@ class MainActivity : ComponentActivity() {
                     if (permissions.values.all { it }) startScan()
                     else status.value = "Se necesitan permisos Bluetooth para buscar el medidor."
                 }
-                val saveDxfLauncher = rememberLauncherForActivityResult(CreateDxfInDownloads()) { uri ->
+                val saveDxfLauncher = rememberLauncherForActivityResult(CreateDxfDocument()) { uri ->
                     uri?.let {
                         persistDocumentPermissions(it)
                         saveDxf(it, associateDocument = true)
@@ -392,7 +441,7 @@ class MainActivity : ComponentActivity() {
                 ) { uri ->
                     uri?.let { selectedUri ->
                         persistDocumentPermissions(selectedUri)
-                        if (loadDxf(selectedUri)) associateDxfUri(selectedUri)
+                        loadDxf(selectedUri)
                     }
                 }
 
@@ -414,22 +463,25 @@ class MainActivity : ComponentActivity() {
                     selectedDeviceName = selectedDeviceName.value,
                     connectingDeviceName = connectingDeviceName.value,
                     dxfImportRevision = dxfImportRevision.value,
+                    recentDxfPlans = recentDxfPlans.toList(),
                     onSaveDxfClick = {
                         val openedUri = currentDxfUri
                         if (openedUri != null && hasPersistedWritePermission(openedUri)) {
-                            if (!saveDxf(openedUri)) saveDxfLauncher.launch("draftBeam.dxf")
+                            saveDxf(openedUri)
                         } else {
                             if (openedUri != null) {
-                                status.value = "El archivo abierto no permite guardar cambios; elige una ubicación nueva."
+                                status.value = "El archivo abierto no permite guardar cambios; guarda una copia."
                             }
-                            saveDxfLauncher.launch("draftBeam.dxf")
+                            false
                         }
                     },
+                    onCreateDxfClick = { name -> saveDxfLauncher.launch(name) },
                     onLoadDxfClick = {
                         loadDxfLauncher.launch(
                             arrayOf("application/dxf", "application/x-dxf", "image/vnd.dxf", "application/octet-stream", "*/*")
                         )
                     },
+                    onOpenRecentDxfClick = { uriString -> openRecentDxf(uriString) },
                     onScanClick = {
                         val missingPermissions = requiredPermissions()
                             .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
@@ -553,7 +605,15 @@ class MainActivity : ComponentActivity() {
         selectedDeviceName.value = null
         connectingDeviceName.value = meter.name
         status.value = "Conectando a ${meter.name}…"
-        connectedGatt = meter.device.connectGatt(this, false, gattCallback)
+        connectedGatt = try {
+            meter.device.connectGatt(this, false, gattCallback)
+        } catch (_: SecurityException) {
+            null
+        }
+        if (connectedGatt == null) {
+            connectingDeviceName.value = null
+            status.value = "No se pudo iniciar la conexión BLE. Comprueba los permisos y vuelve a intentar."
+        }
     }
 
     @Suppress("MissingPermission")
@@ -642,9 +702,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun addWallFromFinger(start: PointMm, draggedEnd: PointMm) {
+    private fun addWallFromFinger(start: PointMm, draggedEnd: PointMm, preserveEndPoint: Boolean) {
         try {
-            val segment = PlanGeometry.segmentFromDrag(start, draggedEnd)
+            val segment = PlanGeometry.segmentFromDrag(start, draggedEnd, preserveEndPoint = preserveEndPoint)
             pushPlanSnapshot()
             wallSegments.add(segment)
             selectedStartPoint.value = segment.end
@@ -719,13 +779,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun saveDxf(uri: Uri, associateDocument: Boolean = false): Boolean {
+        var originalBytes: ByteArray? = null
+        var writingStarted = false
         try {
-            val output = contentResolver.openOutputStream(uri, "wt")
-                ?: throw IllegalStateException("Android no pudo abrir el archivo para escritura.")
-            output.bufferedWriter(Charsets.UTF_8).use { writer ->
-                writer.write(DxfCodec.encode(wallSegments.toList(), planNotes.toList()))
+            // Prepare the entire DXF before opening the destination with truncation.
+            val bytes = DxfCodec.encode(wallSegments.toList(), planNotes.toList()).toByteArray(Charsets.UTF_8)
+            if (uri == currentDxfUri && !associateDocument) {
+                originalBytes = contentResolver.openInputStream(uri)?.use { input ->
+                    val backup = java.io.ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        require(backup.size() + count <= MAX_DXF_IMPORT_CHARS) {
+                            "El DXF original excede el límite de respaldo."
+                        }
+                        backup.write(buffer, 0, count)
+                    }
+                    backup.toByteArray()
+                } ?: throw IllegalStateException("No se pudo respaldar el archivo original.")
             }
+            writingStarted = true
+            writeDxfBytes(uri, bytes)
             if (associateDocument) associateDxfUri(uri)
+            clearPlanSession()
+            runCatching { rememberRecentDxf(uri) }
             status.value = if (uri == currentDxfUri && !associateDocument) {
                 "Cambios guardados en el archivo DXF abierto."
             } else {
@@ -733,8 +811,15 @@ class MainActivity : ComponentActivity() {
             }
             return true
         } catch (exception: Exception) {
+            val restored = if (writingStarted && originalBytes != null) {
+                runCatching { writeDxfBytes(uri, originalBytes) }.isSuccess
+            } else null
             if (!associateDocument && uri == currentDxfUri) {
-                status.value = "No se pudo actualizar el archivo; elige dónde guardar una copia."
+                status.value = if (restored == false) {
+                    "No se pudo restaurar el DXF original; comprueba el archivo y guarda una copia."
+                } else {
+                    "No se pudo actualizar el archivo; elige dónde guardar una copia."
+                }
             } else {
                 status.value = "No se pudo guardar el DXF: ${exception.message ?: "error de archivo"}"
             }
@@ -742,10 +827,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadDxf(uri: Uri): Boolean {
+    private fun writeDxfBytes(uri: Uri, bytes: ByteArray) {
+        val output = contentResolver.openOutputStream(uri, "wt")
+            ?: throw IllegalStateException("Android no pudo abrir el archivo para escritura.")
+        output.use { it.write(bytes) }
+    }
+
+    private fun loadDxf(uri: Uri, fromRecent: Boolean = false): Boolean {
         try {
             val input = contentResolver.openInputStream(uri)
-                ?: throw IllegalStateException("Android no pudo abrir el archivo seleccionado.")
+                ?: throw FileNotFoundException("Android no pudo abrir el archivo seleccionado.")
             val contents = input.bufferedReader(Charsets.UTF_8).use { reader ->
                 val text = StringBuilder()
                 val buffer = CharArray(8_192)
@@ -761,7 +852,9 @@ class MainActivity : ComponentActivity() {
             }
             val imported = DxfCodec.decode(contents)
             val before = wallSegments.toList()
-            if (before != imported.segments || planNotes.toList() != imported.notes) pushPlanSnapshot()
+            if (before != imported.segments || planNotes.toList() != imported.notes || currentDxfUri != uri) {
+                pushPlanSnapshot(restoresDocument = true)
+            }
             wallSegments.clear()
             wallSegments.addAll(imported.segments)
             planNotes.clear()
@@ -771,6 +864,9 @@ class MainActivity : ComponentActivity() {
             wallEditorOpen.value = false
             pendingEndpointMove.value = null
             selectedStartPoint.value = imported.segments.lastOrNull()?.end
+            associateDxfUri(uri)
+            clearPlanSession()
+            runCatching { rememberRecentDxf(uri) }
             dxfImportRevision.value++
             status.value = buildString {
                 append("DXF cargado: ${imported.segments.size} entidades editables.")
@@ -778,9 +874,59 @@ class MainActivity : ComponentActivity() {
             }
             return true
         } catch (exception: Exception) {
+            if (fromRecent && (exception is FileNotFoundException || exception is SecurityException)) {
+                forgetRecentDxf(uri.toString())
+            }
             status.value = "No se pudo cargar el DXF: ${exception.message ?: "archivo no válido"}"
             return false
         }
+    }
+
+    private fun openRecentDxf(uriString: String) {
+        val uri = Uri.parse(uriString)
+        if (contentResolver.persistedUriPermissions.none { it.uri == uri && it.isReadPermission }) {
+            forgetRecentDxf(uriString)
+            status.value = "Ya no hay acceso a ese plano. Se quitó de Recientes; ábrelo de nuevo con el selector."
+            return
+        }
+        loadDxf(uri, fromRecent = true)
+    }
+
+    private fun readRecentDxfPlans(): List<RecentDxfPlan> {
+        val preferences = getSharedPreferences(RECENT_DXF_PREFERENCES, MODE_PRIVATE)
+        return (0 until RecentDxfPlans.LIMIT).mapNotNull { index ->
+            val uri = preferences.getString("uri_$index", null) ?: return@mapNotNull null
+            val name = preferences.getString("name_$index", null) ?: return@mapNotNull null
+            RecentDxfPlan(uri, name)
+        }.distinctBy { it.uri }
+    }
+
+    private fun rememberRecentDxf(uri: Uri) {
+        if (contentResolver.persistedUriPermissions.none { it.uri == uri && it.isReadPermission }) return
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            }
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/') ?: "Plano DXF"
+        recentDxfPlans.clear()
+        recentDxfPlans.addAll(RecentDxfPlans.opened(readRecentDxfPlans(), RecentDxfPlan(uri.toString(), name)))
+        persistRecentDxfPlans()
+        getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit()
+            .putString(DXF_LAST_LOCATION_KEY, uri.toString()).apply()
+    }
+
+    private fun forgetRecentDxf(uriString: String) {
+        recentDxfPlans.removeAll { it.uri == uriString }
+        persistRecentDxfPlans()
+    }
+
+    private fun persistRecentDxfPlans() {
+        val editor = getSharedPreferences(RECENT_DXF_PREFERENCES, MODE_PRIVATE).edit().clear()
+        recentDxfPlans.forEachIndexed { index, plan ->
+            editor.putString("uri_$index", plan.uri).putString("name_$index", plan.name)
+        }
+        editor.apply()
     }
 
     private fun restoreLastOpenedDxf() {
@@ -794,7 +940,87 @@ class MainActivity : ComponentActivity() {
             return
         }
         persistDocumentPermissions(uri)
-        if (loadDxf(uri)) associateDxfUri(uri)
+        loadDxf(uri)
+    }
+
+    private fun restorePlanSession(): Boolean {
+        val file = AtomicFile(File(filesDir, PLAN_SESSION_FILE))
+        return try {
+            val session = PlanSessionCodec.decode(file.openRead().use { input ->
+                val bytes = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    require(bytes.size() + count <= MAX_PLAN_SESSION_BYTES) { "Borrador demasiado grande." }
+                    bytes.write(buffer, 0, count)
+                }
+                bytes.toByteArray()
+            })
+            wallSegments.addAll(session.segments)
+            planNotes.addAll(session.notes)
+            selectedStartPoint.value = session.selectedStartPoint
+            currentDxfUri = session.documentUri?.let(Uri::parse)?.takeIf(::hasPersistedWritePermission)
+            draftGate.restored()
+            dxfImportRevision.value++
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        mainHandler.postDelayed(periodicDraftSave, DRAFT_SAVE_INTERVAL_MS)
+    }
+
+    override fun onPause() {
+        mainHandler.removeCallbacks(periodicDraftSave)
+        draftGate.invalidatePending()
+        super.onPause()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        persistPlanSession()
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onStop() {
+        draftGate.invalidatePending()
+        persistPlanSession()
+        super.onStop()
+    }
+
+    private fun persistPlanSession() {
+        val token = draftGate.pending() ?: return
+        val session = currentPlanSession()
+        try {
+            draftGate.write(token) { writePlanSession(session) }
+        } catch (exception: Exception) {
+            status.value = "No se pudo conservar el borrador: ${exception.message ?: "error de almacenamiento"}"
+        }
+    }
+
+    private fun currentPlanSession(): PlanSession = PlanSession(
+        wallSegments.toList(), planNotes.toList(), selectedStartPoint.value, currentDxfUri?.toString()
+    )
+
+    private fun writePlanSession(session: PlanSession) {
+        val bytes = PlanSessionCodec.encode(session)
+        require(bytes.size <= MAX_PLAN_SESSION_BYTES) { "Borrador demasiado grande." }
+        val file = AtomicFile(File(filesDir, PLAN_SESSION_FILE))
+        val stream = file.startWrite()
+        try {
+            stream.write(bytes)
+            file.finishWrite(stream)
+        } catch (exception: Exception) {
+            file.failWrite(stream)
+            throw exception
+        }
+    }
+
+    private fun clearPlanSession() {
+        draftGate.clean { runCatching { AtomicFile(File(filesDir, PLAN_SESSION_FILE)).delete() } }
     }
 
     private fun persistDocumentPermissions(uri: Uri) {
@@ -813,12 +1039,12 @@ class MainActivity : ComponentActivity() {
     private fun hasPersistedWritePermission(uri: Uri): Boolean =
         contentResolver.persistedUriPermissions.any { it.uri == uri && it.isWritePermission }
 
-    private fun associateDxfUri(uri: Uri) {
+    private fun associateDxfUri(uri: Uri?) {
         currentDxfUri = uri
         val permissions = contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri }
         if (permissions?.isReadPermission == true) {
             getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit()
-                .putString(DXF_URI_KEY, uri.toString())
+                .putString(DXF_URI_KEY, uri?.toString())
                 .apply()
         } else {
             getSharedPreferences(DXF_PREFERENCES, MODE_PRIVATE).edit().remove(DXF_URI_KEY).apply()
@@ -856,14 +1082,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun pushPlanSnapshot() {
+    private fun pushPlanSnapshot(restoresDocument: Boolean = false) {
+        draftGate.changed()
         undoHistory.add(
             PlanSnapshot(
                 segments = wallSegments.toList(),
                 notes = planNotes.toList(),
-                selectedStartPoint = selectedStartPoint.value
+                selectedStartPoint = selectedStartPoint.value,
+                documentUri = currentDxfUri,
+                restoresDocument = restoresDocument
             )
         )
+        if (undoHistory.size > MAX_UNDO_SNAPSHOTS) undoHistory.removeAt(0)
     }
 
     private fun undoLastPlanAction() {
@@ -873,6 +1103,8 @@ class MainActivity : ComponentActivity() {
         planNotes.clear()
         planNotes.addAll(previous.notes)
         selectedStartPoint.value = previous.selectedStartPoint
+        if (previous.restoresDocument) associateDxfUri(previous.documentUri)
+        draftGate.changed()
         selectedWallIndex.value = null
         selectedNoteIndex.value = null
         wallEditorOpen.value = false
@@ -886,6 +1118,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(stopScanRunnable)
+        mainHandler.removeCallbacks(periodicDraftSave)
+        draftExecutor.shutdown()
         try {
             scanner?.stopScan(scanCallback)
             connectedGatt?.close()
@@ -918,8 +1152,11 @@ fun DraftBeamScreen(
     selectedDeviceName: String?,
     connectingDeviceName: String?,
     dxfImportRevision: Int,
-    onSaveDxfClick: () -> Unit,
+    recentDxfPlans: List<RecentDxfPlan>,
+    onSaveDxfClick: () -> Boolean,
+    onCreateDxfClick: (String) -> Unit,
     onLoadDxfClick: () -> Unit,
+    onOpenRecentDxfClick: (String) -> Unit,
     onScanClick: () -> Unit,
     onDeviceClick: (ScannedMeter) -> Unit,
     onDisconnectClick: () -> Unit,
@@ -940,7 +1177,7 @@ fun DraftBeamScreen(
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismissWallEditor: () -> Unit,
-    onFingerDrawn: (PointMm, PointMm) -> Unit
+    onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit
 ) {
     val viewport = remember { PlanViewportState() }
     var snapOptions by remember { mutableStateOf(DraftSnapOptions()) }
@@ -948,6 +1185,9 @@ fun DraftBeamScreen(
     var showMeasurements by remember { mutableStateOf(false) }
     var showFullscreenPlan by remember { mutableStateOf(false) }
     var showReplaceDxfConfirmation by remember { mutableStateOf(false) }
+    var pendingRecentDxfUri by remember { mutableStateOf<String?>(null) }
+    var showSaveNameDialog by remember { mutableStateOf(false) }
+    var saveNameDraft by remember { mutableStateOf("") }
     var showBleDialog by remember { mutableStateOf(false) }
     var overflowMenuExpanded by remember { mutableStateOf(false) }
     var pendingConnection by remember { mutableStateOf<PendingConnection?>(null) }
@@ -966,7 +1206,18 @@ fun DraftBeamScreen(
     }
 
     val requestLoadDxf = {
-        if (wallSegments.isEmpty()) onLoadDxfClick() else showReplaceDxfConfirmation = true
+        pendingRecentDxfUri = null
+        if (wallSegments.isEmpty() && notes.isEmpty()) onLoadDxfClick() else showReplaceDxfConfirmation = true
+    }
+    val requestRecentDxf: (String) -> Unit = { uri ->
+        overflowMenuExpanded = false
+        pendingRecentDxfUri = uri
+        if (wallSegments.isEmpty() && notes.isEmpty()) {
+            onOpenRecentDxfClick(uri)
+            pendingRecentDxfUri = null
+        } else {
+            showReplaceDxfConfirmation = true
+        }
     }
     val openBlePicker = {
         overflowMenuExpanded = false
@@ -1060,14 +1311,19 @@ fun DraftBeamScreen(
                     IconButton(onClick = requestLoadDxf, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Filled.FolderOpen, contentDescription = "Abrir DXF")
                     }
-                    IconButton(onClick = onSaveDxfClick, modifier = Modifier.size(44.dp)) {
+                    IconButton(onClick = {
+                        if (!onSaveDxfClick()) {
+                            saveNameDraft = ""
+                            showSaveNameDialog = true
+                        }
+                    }, modifier = Modifier.size(44.dp)) {
                         Icon(Icons.Filled.Save, contentDescription = "Guardar DXF")
                     }
                     Box {
                         IconButton(
                             onClick = { overflowMenuExpanded = true },
                             modifier = Modifier.size(44.dp)
-                        ) { Icon(Icons.Filled.MoreVert, contentDescription = "Más opciones BLE") }
+                        ) { Icon(Icons.Filled.MoreVert, contentDescription = "Más opciones") }
                         DropdownMenu(
                             expanded = overflowMenuExpanded,
                             onDismissRequest = { overflowMenuExpanded = false },
@@ -1086,6 +1342,30 @@ fun DraftBeamScreen(
                                     showMeasurements = !showMeasurements
                                 }
                             )
+                            DropdownMenuItem(
+                                text = { Text("Guardar como…") },
+                                leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    saveNameDraft = ""
+                                    showSaveNameDialog = true
+                                }
+                            )
+                            if (recentDxfPlans.isNotEmpty()) {
+                                HorizontalDivider()
+                                Text(
+                                    "Planos recientes",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                                recentDxfPlans.take(RecentDxfPlans.LIMIT).forEach { plan ->
+                                    DropdownMenuItem(
+                                        text = { Text(plan.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        leadingIcon = { Icon(Icons.Filled.FolderOpen, contentDescription = null) },
+                                        onClick = { requestRecentDxf(plan.uri) }
+                                    )
+                                }
+                            }
                             DropdownMenuItem(
                                 text = {
                                     Text(
@@ -1304,19 +1584,55 @@ fun DraftBeamScreen(
         )
     }
 
+    if (showSaveNameDialog) {
+        val filename = RecentDxfPlans.filename(saveNameDraft)
+        AlertDialog(
+            onDismissRequest = { showSaveNameDialog = false },
+            title = { Text("Guardar plano DXF") },
+            text = {
+                OutlinedTextField(
+                    value = saveNameDraft,
+                    onValueChange = { saveNameDraft = it },
+                    label = { Text("Nombre del archivo") },
+                    placeholder = { Text("Mi plano") },
+                    supportingText = { Text("Elige la carpeta en el siguiente paso. Se añadirá .dxf si falta.") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(enabled = filename != null, onClick = {
+                    filename?.let {
+                        showSaveNameDialog = false
+                        onCreateDxfClick(it)
+                    }
+                }) { Text("Elegir carpeta") }
+            },
+            dismissButton = { TextButton(onClick = { showSaveNameDialog = false }) { Text("Cancelar") } }
+        )
+    }
+
     if (showReplaceDxfConfirmation) {
         AlertDialog(
-            onDismissRequest = { showReplaceDxfConfirmation = false },
+            onDismissRequest = {
+                showReplaceDxfConfirmation = false
+                pendingRecentDxfUri = null
+            },
             title = { Text("Cargar otro plano") },
             text = { Text("El DXF reemplazará el plano actual. Podrás deshacer esta carga después.") },
             confirmButton = {
                 TextButton(onClick = {
                     showReplaceDxfConfirmation = false
-                    onLoadDxfClick()
+                    val recent = pendingRecentDxfUri
+                    pendingRecentDxfUri = null
+                    if (recent == null) onLoadDxfClick() else onOpenRecentDxfClick(recent)
                 }) { Text("Continuar") }
             },
             dismissButton = {
-                TextButton(onClick = { showReplaceDxfConfirmation = false }) { Text("Cancelar") }
+                TextButton(onClick = {
+                    showReplaceDxfConfirmation = false
+                    pendingRecentDxfUri = null
+                }) { Text("Cancelar") }
             }
         )
     }
@@ -1491,20 +1807,20 @@ fun DraftBeamScreen(
     pendingConnection?.let { connection ->
         AlertDialog(
             onDismissRequest = {
-                onFingerDrawn(connection.start, connection.freeEnd)
+                onFingerDrawn(connection.start, connection.freeEnd, false)
                 pendingConnection = null
             },
             title = { Text("Conectar extremos") },
             text = { Text("El extremo está cerca de un punto existente. ¿Quieres conectar la línea con ese punto?") },
             confirmButton = {
                 TextButton(onClick = {
-                    onFingerDrawn(connection.start, connection.target)
+                    onFingerDrawn(connection.start, connection.target, true)
                     pendingConnection = null
                 }) { Text("Sí") }
             },
             dismissButton = {
                 TextButton(onClick = {
-                    onFingerDrawn(connection.start, connection.freeEnd)
+                    onFingerDrawn(connection.start, connection.freeEnd, false)
                     pendingConnection = null
                 }) { Text("No") }
             }
@@ -2007,3 +2323,9 @@ private const val SCAN_DURATION_MS = 12_000L
 private const val MAX_DXF_IMPORT_CHARS = 16 * 1024 * 1024
 private const val DXF_PREFERENCES = "dxf_document_preferences"
 private const val DXF_URI_KEY = "associated_dxf_uri"
+private const val DXF_LAST_LOCATION_KEY = "last_dxf_document_uri"
+private const val RECENT_DXF_PREFERENCES = "recent_dxf_documents"
+private const val PLAN_SESSION_FILE = "plan_session.bin"
+private const val MAX_UNDO_SNAPSHOTS = 50
+private const val MAX_PLAN_SESSION_BYTES = 32 * 1024 * 1024
+private const val DRAFT_SAVE_INTERVAL_MS = 60_000L

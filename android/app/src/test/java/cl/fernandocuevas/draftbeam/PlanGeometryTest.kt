@@ -252,6 +252,18 @@ class PlanGeometryTest {
     }
 
     @Test
+    fun capturedEndpointIsPreservedExactlyEvenNearAnOrthogonalAxis() {
+        val start = PointMm(0.0, 0.0)
+        val endpoint = PointMm(1_000.25, 50.5)
+
+        val captured = PlanGeometry.segmentFromDrag(start, endpoint, preserveEndPoint = true)
+        val ordinary = PlanGeometry.segmentFromDrag(start, endpoint)
+
+        assertEquals(endpoint, captured.end)
+        assertTrue(ordinary.end != endpoint)
+    }
+
+    @Test
     fun rejectsZeroOrNegativeWallLength() {
         assertThrows(IllegalArgumentException::class.java) {
             PlanGeometry.appendSegment(emptyList(), 0.0, 0)

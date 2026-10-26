@@ -67,7 +67,7 @@ fun PlanPreview(
     onNoteSelected: (Int?) -> Unit = {},
     onNotePlaced: (PointMm) -> Unit = {},
     onStartPointSelected: (PointMm) -> Unit,
-    onFingerDrawn: (PointMm, PointMm) -> Unit,
+    onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit,
     onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
     onConnectionRequested: (PointMm, PointMm, PointMm) -> Unit,
     modifier: Modifier = Modifier
@@ -191,7 +191,8 @@ fun PlanPreview(
                                     draftSnapPreview.value = snap
                                     draftSegment.value = makePreviewSegment(
                                         endpoint,
-                                        snap.point
+                                        snap.point,
+                                        preserveEndPoint = snap.type != null
                                     )
                                     magnifier.value = findNearbyEndpoint(
                                         segments, endpoint, snap.point, size, viewport, endpointSnapTolerancePx
@@ -215,7 +216,8 @@ fun PlanPreview(
                                 draftSnapPreview.value = snap
                                 draftSegment.value = makePreviewSegment(
                                     source,
-                                    snap.point
+                                    snap.point,
+                                    preserveEndPoint = snap.type != null
                                 )
                                 magnifier.value = findNearbyEndpoint(
                                     segments, source, snap.point, size, viewport, endpointSnapTolerancePx
@@ -265,18 +267,18 @@ fun PlanPreview(
                                     val snap = resolveDraftAt(currentPosition, endpoint!!)
                                     draftSnapPreview.value = snap
                                     val drawnEnd = snap.point
-                                    val nearbyEndpoint = findNearbyEndpoint(
+                                    val nearbyEndpoint = if (snapOptions.endpointMagnetEnabled) findNearbyEndpoint(
                                         segments = segments,
                                         startPoint = endpoint!!,
                                         endPoint = drawnEnd,
                                         canvasSize = size,
                                         viewport = viewport,
                                         tolerancePx = endpointSnapTolerancePx
-                                    )
+                                    ) else null
                                     if (nearbyEndpoint != null) {
-                                        onConnectionRequested(endpoint, drawnEnd, nearbyEndpoint)
+                                        onConnectionRequested(endpoint, viewport.unproject(currentPosition, size), nearbyEndpoint)
                                     } else {
-                                        onFingerDrawn(endpoint, drawnEnd)
+                                        onFingerDrawn(endpoint, drawnEnd, snap.type != null)
                                     }
                                 }
                                 GestureMode.MOVE_ENDPOINT -> {
@@ -772,9 +774,9 @@ private val DRAFT_WALL_COLOR = Color(0xFF2E7D32)
 private fun makePreviewSegment(
     start: PointMm,
     end: PointMm,
-    snapToleranceDegrees: Double = PlanGeometry.DEFAULT_SNAP_TOLERANCE_DEGREES
+    preserveEndPoint: Boolean = false
 ): WallSegment? = runCatching {
-    PlanGeometry.segmentFromDrag(start, end, snapToleranceDegrees)
+    PlanGeometry.segmentFromDrag(start, end, preserveEndPoint = preserveEndPoint)
 }.getOrNull()
 
 private enum class GestureMode { TAP, DRAW, MOVE_ENDPOINT, PAN, PINCH }
