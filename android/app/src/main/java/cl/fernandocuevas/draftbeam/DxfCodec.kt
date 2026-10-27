@@ -222,28 +222,16 @@ object DxfCodec {
                     appendLine(visibleLayer(index), PlanGeometry.wallPoint(segment, from), PlanGeometry.wallPoint(segment, to))
                 }
                 segment.openings.forEach { opening ->
-                    if (opening.kind == OpeningKind.WINDOW) {
-                        OpeningGeometry.windowLines(segment, opening).forEach { line ->
+                    when (opening) {
+                        is WindowOpening -> OpeningGeometry.windowLines(segment, opening).forEach { line ->
                             appendLine(OPENING_LAYER, line.start, line.end)
                         }
-                    } else {
-                        val leaf = OpeningGeometry.doorLeaf(segment, opening)
-                        appendLine(OPENING_LAYER, leaf.start, leaf.end)
-                        val arc = OpeningGeometry.doorArc(segment, opening)
-                        val hinge = leaf.start
-                        fun angle(point: PointMm): Double = PlanGeometry.normalizeAngle(
-                            Math.toDegrees(atan2(point.y - hinge.y, point.x - hinge.x)))
-                        val cross = (arc[0].x - hinge.x) * (arc[1].y - hinge.y) -
-                            (arc[0].y - hinge.y) * (arc[1].x - hinge.x)
-                        pair(0, "ARC")
-                        pair(100, "AcDbEntity")
-                        pair(8, OPENING_LAYER)
-                        pair(100, "AcDbCircle")
-                        pair(10, number(hinge.x)); pair(20, number(hinge.y)); pair(30, "0")
-                        pair(40, opening.lengthMm.toString())
-                        pair(100, "AcDbArc")
-                        pair(50, number(angle(if (cross >= 0) arc.first() else arc.last())))
-                        pair(51, number(angle(if (cross >= 0) arc.last() else arc.first())))
+                        is DoorOpening -> {
+                            val geometry = OpeningGeometry.doorGeometry(segment, opening)
+                            geometry.frameLines.forEach { appendLine(OPENING_LAYER, it.start, it.end) }
+                            appendClosedPolyline(OPENING_LAYER, geometry.leaf)
+                            appendArc(OPENING_LAYER, geometry)
+                        }
                     }
                 }
             }
@@ -281,6 +269,7 @@ object DxfCodec {
         val genericEntities = mutableListOf<DxfEntity>()
         var ignored = 0
         var decomposedPolylines = 0
+        var droppedDoors = 0
 
         entities.forEach { entity ->
             when (entity) {
@@ -308,8 +297,9 @@ object DxfCodec {
             }
             val widthAndSide = inferWallWidth(line, outlinesById[id].orEmpty(), unitScale)
             val wall = line.toWallSegment(widthAndSide.first, widthAndSide.second)
-            val openings = axis.openings.map(::decodeOpening)
-            val withOpenings = wall.copy(openings = openings)
+            val decoded = decodeOpenings(axis.openings)
+            droppedDoors += decoded.droppedDoors
+            val withOpenings = wall.copy(openings = decoded.openings)
             PlanGeometry.validateOpenings(withOpenings)
             result += withOpenings
         }
@@ -354,6 +344,7 @@ object DxfCodec {
         }
 
         val warnings = buildList {
+            if (droppedDoors > 0) add("Se descartaron $droppedDoors puertas del formato anterior.")
             if (ignored > 0) add("Se omitieron $ignored entidades no compatibles o inválidas.")
             if (decomposedPolylines > 0) {
                 add("Se descompusieron $decomposedPolylines polilíneas externas en líneas editables; no se puede deducir su ancho de muro automáticamente.")
@@ -595,21 +586,104 @@ object DxfCodec {
     private fun wallLayer(index: Int) = "${WALL_LAYER_PREFIX}${(index + 1).toString().padStart(4, '0')}"
     private fun visibleLayer(index: Int) = "${VISIBLE_LAYER_PREFIX}${(index + 1).toString().padStart(4, '0')}"
 
-    private fun encodeOpening(opening: WallOpening): String = listOf(
-        "DBO1", opening.kind.name, opening.offsetMm, opening.lengthMm, opening.alignment.name,
-        opening.frameWidthMm, if (opening.hingeAtStart) 1 else 0,
-        if (opening.swingTowardWall) 1 else 0, opening.openingAngleDegrees
-    ).joinToString(";")
+    private fun encodeOpening(opening: WallOpening): String = when (opening) {
+        is DoorOpening -> listOf(
+            "DBO3", "DOOR", opening.offsetMm, opening.holeLengthMm,
+            if (opening.hingeAtStart) 1 else 0, number(opening.openAngleDegrees),
+            if (opening.swingTowardNearFace) 1 else 0, opening.leafThicknessMm
+        ).joinToString(";")
+        is WindowOpening -> listOf(
+            "DBO2", "WINDOW", opening.offsetMm, opening.holeLengthMm, opening.frameDepthMm,
+            opening.alignment.name
+        ).joinToString(";")
+    }
 
-    private fun decodeOpening(value: String): WallOpening {
-        val fields = value.split(';')
-        require(fields.size == 9 && fields[0] == "DBO1") { "Vano DXF no compatible." }
-        require(fields[6] in listOf("0", "1") && fields[7] in listOf("0", "1")) {
-            "Dirección de puerta DXF inválida."
+    private data class DecodedOpenings(val openings: List<WallOpening>, val droppedDoors: Int)
+
+    private fun decodeOpenings(values: List<String>): DecodedOpenings {
+        var dropped = 0
+        val openings = values.mapNotNull { value ->
+            val decoded = decodeOpening(value)
+            if (decoded == null) dropped++
+            decoded
         }
-        return WallOpening(OpeningKind.valueOf(fields[1]), fields[2].toLong(), fields[3].toLong(),
-            OpeningAlignment.valueOf(fields[4]), fields[5].toLong(), fields[6] == "1", fields[7] == "1",
-            fields[8].toInt())
+        return DecodedOpenings(openings, dropped)
+    }
+
+    /** Returns null for the removed door formats; [decodeOpenings] counts them. */
+    private fun decodeOpening(value: String): WallOpening? {
+        val fields = value.split(';')
+        return when (fields.firstOrNull()) {
+            "DBO1" -> {
+                require(fields.size == 9) { "Vano DXF no compatible." }
+                require(fields[6] in listOf("0", "1") && fields[7] in listOf("0", "1")) {
+                    "Dirección de puerta DXF inválida."
+                }
+                require(fields[1] in listOf("DOOR", "WINDOW")) { "Tipo de vano DXF inválido." }
+                if (fields[1] == "DOOR") {
+                    null
+                } else {
+                    WindowOpening(
+                        offsetMm = fields[2].toLong(),
+                        holeLengthMm = fields[3].toLong(),
+                        alignment = OpeningAlignment.valueOf(fields[4]),
+                        frameDepthMm = fields[5].toLong()
+                    )
+                }
+            }
+            "DBO2" -> when {
+                fields.size == 10 && fields[1] == "DOOR" -> null
+                fields.size == 6 && fields[1] == "WINDOW" -> WindowOpening(
+                    offsetMm = fields[2].toLong(),
+                    holeLengthMm = fields[3].toLong(),
+                    frameDepthMm = fields[4].toLong(),
+                    alignment = OpeningAlignment.valueOf(fields[5])
+                )
+                else -> throw IllegalArgumentException("Vano DXF no compatible.")
+            }
+            "DBO3" -> {
+                require(fields.size == 8 && fields[1] == "DOOR") { "Vano DXF no compatible." }
+                require(fields[4] in listOf("0", "1") && fields[6] in listOf("0", "1")) {
+                    "Dirección de puerta DXF inválida."
+                }
+                DoorOpening(
+                    offsetMm = fields[2].toLong(),
+                    holeLengthMm = fields[3].toLong(),
+                    hingeAtStart = fields[4] == "1",
+                    openAngleDegrees = fields[5].toDouble(),
+                    swingTowardNearFace = fields[6] == "1",
+                    leafThicknessMm = fields[7].toLong()
+                )
+            }
+            else -> throw IllegalArgumentException("Vano DXF no compatible.")
+        }
+    }
+
+    private fun StringBuilder.appendClosedPolyline(layer: String, points: List<PointMm>) {
+        if (points.size < 3) return
+        pair(0, "LWPOLYLINE")
+        pair(100, "AcDbEntity")
+        pair(8, layer)
+        pair(100, "AcDbPolyline")
+        pair(90, points.size.toString())
+        pair(70, "1")
+        points.forEach { point ->
+            pair(10, number(point.x))
+            pair(20, number(point.y))
+        }
+    }
+
+    private fun StringBuilder.appendArc(layer: String, geometry: DoorPlanGeometry) {
+        if (geometry.arc.size < 2) return
+        pair(0, "ARC")
+        pair(100, "AcDbEntity")
+        pair(8, layer)
+        pair(100, "AcDbCircle")
+        pair(10, number(geometry.hinge.x)); pair(20, number(geometry.hinge.y)); pair(30, "0")
+        pair(40, number(geometry.radiusMm))
+        pair(100, "AcDbArc")
+        pair(50, number(geometry.arcStartDegrees))
+        pair(51, number(geometry.arcEndDegrees))
     }
 
     private fun StringBuilder.appendLine(layer: String, start: PointMm, end: PointMm) {

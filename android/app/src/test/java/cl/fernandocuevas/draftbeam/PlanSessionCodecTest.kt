@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlanSessionCodecTest {
@@ -12,18 +13,27 @@ class PlanSessionCodecTest {
         val session = PlanSession(
             segments = listOf(
                 WallSegment(
-                    start = PointMm(0.25, -1.75),
-                    end = PointMm(123.456, 88.5),
-                    lengthMm = 152,
-                    angleDegrees = 36.3,
-                    widthMm = 90,
+                    start = PointMm(0.0, 0.0),
+                    end = PointMm(2_000.0, 0.0),
+                    lengthMm = 2_000,
+                    angleDegrees = 0.0,
+                    widthMm = 200,
                     growthSide = WallGrowthSide.RIGHT,
-                    openings = listOf(WallOpening(OpeningKind.DOOR, 5, 90,
-                        OpeningAlignment.CENTER, hingeAtStart = false))
+                    openings = listOf(
+                        DoorOpening(
+                            offsetMm = 100,
+                            holeLengthMm = 800,
+                            hingeAtStart = false,
+                            openAngleDegrees = 45.5,
+                            swingTowardNearFace = true,
+                            leafThicknessMm = 40
+                        ),
+                        WindowOpening(1_200, 500, OpeningAlignment.FAR_FACE, 60)
+                    )
                 )
             ),
             notes = listOf(PlanNote("Cocina", PointMm(15.5, 8.25), 75.0, 32.0)),
-            selectedStartPoint = PointMm(123.456, 88.5),
+            selectedStartPoint = PointMm(2_000.0, 0.0),
             documentUri = "content://example.documents/document/plan.dxf"
         )
 
@@ -35,7 +45,7 @@ class PlanSessionCodecTest {
         val valid = PlanSessionCodec.encode(PlanSession(emptyList(), emptyList(), null, null))
         assertThrows(Exception::class.java) { PlanSessionCodec.decode(valid.copyOf(6)) }
         assertThrows(IllegalArgumentException::class.java) {
-            PlanSessionCodec.decode(valid.copyOf().also { it[3] = 3 })
+            PlanSessionCodec.decode(valid.copyOf().also { it[3] = 5 })
         }
     }
 
@@ -60,5 +70,76 @@ class PlanSessionCodecTest {
         val restored = PlanSessionCodec.decode(bytes)
         assertEquals(1, restored.segments.size)
         assertEquals(emptyList<WallOpening>(), restored.segments.single().openings)
+    }
+
+    @Test
+    fun versionThreeDraftDropsFramedDoorsButKeepsWindows() {
+        val bytes = ByteArrayOutputStream().also { buffer ->
+            DataOutputStream(buffer).use { output ->
+                output.writeInt(3)
+                output.writeBoolean(false)
+                output.writeBoolean(false)
+                output.writeInt(1) // walls
+                output.writeDouble(0.0); output.writeDouble(0.0)
+                output.writeDouble(1_000.0); output.writeDouble(0.0)
+                output.writeLong(1_000)
+                output.writeDouble(0.0)
+                output.writeLong(200)
+                output.writeInt(WallGrowthSide.LEFT.ordinal)
+                output.writeInt(2) // openings
+                output.writeInt(1) // framed door of the removed design
+                output.writeLong(10); output.writeLong(40); output.writeLong(100)
+                output.writeLong(700); output.writeLong(40)
+                output.writeInt(OpeningAlignment.CENTER.ordinal)
+                output.writeBoolean(true); output.writeBoolean(false)
+                output.writeInt(2) // window
+                output.writeLong(800); output.writeLong(100)
+                output.writeInt(OpeningAlignment.NEAR_FACE.ordinal)
+                output.writeLong(50)
+                output.writeInt(0) // notes
+            }
+        }.toByteArray()
+
+        val restored = PlanSessionCodec.decode(bytes)
+        val openings = restored.segments.single().openings
+        assertEquals(1, openings.size)
+        assertEquals(WindowOpening(800, 100, OpeningAlignment.NEAR_FACE, 50), openings.single())
+        assertTrue(restored.warnings.single().contains("1 puertas"))
+    }
+
+    @Test
+    fun versionTwoDraftDropsFramelessDoorsButKeepsWindows() {
+        val bytes = ByteArrayOutputStream().also { buffer ->
+            DataOutputStream(buffer).use { output ->
+                output.writeInt(2)
+                output.writeBoolean(false)
+                output.writeBoolean(false)
+                output.writeInt(1) // walls
+                output.writeDouble(0.0); output.writeDouble(0.0)
+                output.writeDouble(1_000.0); output.writeDouble(0.0)
+                output.writeLong(1_000)
+                output.writeDouble(0.0)
+                output.writeLong(200)
+                output.writeInt(WallGrowthSide.LEFT.ordinal)
+                output.writeInt(2) // openings
+                output.writeInt(0) // legacy DOOR
+                output.writeLong(10); output.writeLong(700)
+                output.writeInt(OpeningAlignment.CENTER.ordinal)
+                output.writeLong(0)
+                output.writeBoolean(true); output.writeBoolean(false); output.writeInt(90)
+                output.writeInt(1) // legacy WINDOW
+                output.writeLong(800); output.writeLong(100)
+                output.writeInt(OpeningAlignment.NEAR_FACE.ordinal)
+                output.writeLong(50)
+                output.writeBoolean(false); output.writeBoolean(false); output.writeInt(90)
+                output.writeInt(0) // notes
+            }
+        }.toByteArray()
+
+        val restored = PlanSessionCodec.decode(bytes)
+        val openings = restored.segments.single().openings
+        assertEquals(1, openings.size)
+        assertEquals(WindowOpening(800, 100, OpeningAlignment.NEAR_FACE, 50), openings.single())
+        assertTrue(restored.warnings.single().contains("1 puertas"))
     }
 }
