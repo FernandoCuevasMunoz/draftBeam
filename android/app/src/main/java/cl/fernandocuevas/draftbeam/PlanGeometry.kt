@@ -522,6 +522,11 @@ object PlanGeometry {
         if (hole < MIN_DOOR_HOLE_MM) {
             return DoorSpanResult.Rejected("El vano debe medir al menos $MIN_DOOR_HOLE_MM mm.")
         }
+        if (start <= 0L && start + hole >= wallLength.roundToLong()) {
+            return DoorSpanResult.Rejected(
+                "El vano no puede ocupar el muro completo: dejá muro en los dos extremos."
+            )
+        }
         val span = DoorSpan(start, hole, first <= second)
         val candidate = DoorOpening(offsetMm = span.offsetMm, holeLengthMm = span.holeLengthMm,
             hingeAtStart = span.hingeAtStart)

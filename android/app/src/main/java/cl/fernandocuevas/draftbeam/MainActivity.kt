@@ -1314,6 +1314,7 @@ fun DraftBeamScreen(
     var doorDraft by remember { mutableStateOf<DoorDraft?>(null) }
     var doorPreview by remember { mutableStateOf<DoorOpening?>(null) }
     var doorPlacementMessage by remember { mutableStateOf<String?>(null) }
+    var doorPlacementMessageIsError by remember { mutableStateOf(false) }
     var doorEditTarget by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var focusWallWidth by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
@@ -1392,6 +1393,7 @@ fun DraftBeamScreen(
         doorDraft = null
         doorPreview = null
         doorPlacementMessage = null
+        doorPlacementMessageIsError = false
         doorEditTarget = null
     }
 
@@ -1405,15 +1407,21 @@ fun DraftBeamScreen(
     val handleDoorTapped: (Int?, PointMm) -> Unit = { wallIndex, world ->
         val wall = wallIndex?.let(wallSegments::getOrNull)
         if (wall == null) {
-            doorPlacementMessage = "Tocá sobre un muro para medir la puerta."
+            doorPlacementMessage = "Ningún muro en ese punto. Tocá sobre la línea o el ancho de un muro."
+            doorPlacementMessageIsError = true
         } else if (wall.widthMm <= 0L) {
-            doorPlacementMessage = "Ese muro no tiene espesor. Edítalo y dale un ancho."
+            doorDraft = DoorDraft(wallIndex!!, world)
+            doorPreview = null
+            doorPlacementMessage = "Muro tomado, pero no tiene espesor. Editalo y dale un ancho."
+            doorPlacementMessageIsError = true
         } else {
             val draft = doorDraft
             if (draft == null || draft.wallIndex != wallIndex) {
                 doorDraft = DoorDraft(wallIndex, world)
                 doorPreview = null
-                doorPlacementMessage = "Tocá el otro extremo del vano sobre el mismo muro."
+                doorPlacementMessage =
+                    "Muro tomado en el primer punto. Tocá el otro extremo del vano sobre ese mismo muro."
+                doorPlacementMessageIsError = false
             } else {
                 when (val measured = PlanGeometry.doorSpan(wall, draft.firstTap, world)) {
                     is PlanGeometry.DoorSpanResult.Ready -> {
@@ -1425,9 +1433,11 @@ fun DraftBeamScreen(
                         )
                         doorPlacementMessage =
                             "Vano de ${measured.span.holeLengthMm} mm. Movés el dedo para elegir el lado y el ángulo; tocá para confirmar."
+                        doorPlacementMessageIsError = false
                     }
                     is PlanGeometry.DoorSpanResult.Rejected -> {
                         doorPlacementMessage = measured.message
+                        doorPlacementMessageIsError = true
                     }
                 }
             }
@@ -1453,6 +1463,7 @@ fun DraftBeamScreen(
                 cancelDoorFlow()
             } else {
                 doorPlacementMessage = result
+                doorPlacementMessageIsError = true
             }
         }
     }
@@ -1638,6 +1649,8 @@ fun DraftBeamScreen(
                         pendingConnection = PendingConnection(start, freeEnd, target)
                     },
                     doorPlacementSpan = doorDraft?.span,
+                    doorPlacementWallIndex = doorDraft?.wallIndex,
+                    doorPlacementAnchor = doorDraft?.firstTap,
                     placingDoor = doorPlacementActive,
                     onDoorTapped = handleDoorTapped,
                     onDoorAngleMoved = handleDoorAngleMoved,
@@ -1677,10 +1690,7 @@ fun DraftBeamScreen(
                             Text(
                                 text = doorPlacementMessage
                                     ?: "Tocá el muro donde empieza el vano de la puerta.",
-                                color = if (doorPlacementMessage != null &&
-                                    doorPlacementMessage?.startsWith("Tocá") == false &&
-                                    doorPlacementMessage?.startsWith("Vano") == false
-                                ) {
+                                color = if (doorPlacementMessageIsError) {
                                     MaterialTheme.colorScheme.error
                                 } else {
                                     MaterialTheme.colorScheme.onSurface
@@ -1993,6 +2003,8 @@ fun DraftBeamScreen(
                                 pendingConnection = PendingConnection(start, freeEnd, target)
                             },
                             doorPlacementSpan = doorDraft?.span,
+                            doorPlacementWallIndex = doorDraft?.wallIndex,
+                            doorPlacementAnchor = doorDraft?.firstTap,
                             placingDoor = doorPlacementActive,
                             onDoorTapped = handleDoorTapped,
                             onDoorAngleMoved = handleDoorAngleMoved,

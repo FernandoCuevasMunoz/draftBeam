@@ -45,7 +45,18 @@ class DoorPlacementTest {
             rejected(PointMm(1_500.0, 0.0), PointMm(2_000.0, 0.0), withDoor)
                 .contains("no pueden superponerse")
         )
-        assertTrue(rejected(PointMm(0.0, 0.0), PointMm(3_000.0, 0.0)).contains("caber dentro del muro"))
+        assertTrue(rejected(PointMm(0.0, 0.0), PointMm(3_000.0, 0.0)).contains("muro completo"))
+    }
+
+    @Test
+    fun theWholeWallIsRejectedWithItsOwnMessageInsteadOfASizeError() {
+        // Tapping both wall ends is a common mistake: the message must say why it fails.
+        val message = rejected(PointMm(0.0, 0.0), PointMm(3_000.0, 0.0))
+        assertTrue(message.contains("dejá muro en los dos extremos"))
+        assertEquals(
+            PlanGeometry.DoorSpan(10, 2_980, true),
+            ready(PointMm(10.0, 0.0), PointMm(2_990.0, 0.0))
+        )
     }
 
     @Test

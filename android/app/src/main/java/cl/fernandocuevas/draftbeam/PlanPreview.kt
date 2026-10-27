@@ -74,6 +74,8 @@ fun PlanPreview(
     onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
     onConnectionRequested: (PointMm, PointMm, PointMm) -> Unit,
     doorPlacementSpan: PlanGeometry.DoorSpan? = null,
+    doorPlacementWallIndex: Int? = null,
+    doorPlacementAnchor: PointMm? = null,
     placingDoor: Boolean = false,
     onDoorTapped: (wallIndex: Int?, world: PointMm) -> Unit = { _, _ -> },
     onDoorAngleMoved: (world: PointMm) -> Unit = {},
@@ -523,6 +525,51 @@ fun PlanPreview(
                     wall, door, viewport, size, DraftBeamColors.LaserCyan,
                     preview = true
                 )
+            }
+        }
+
+        // ADT2 feedback: the chosen wall and its measured span stay visible, so a
+        // rejected tap is never silent. A wall without thickness is shown in amber.
+        if (placingDoor) {
+            doorPlacementWallIndex?.let { index ->
+                renderSegments.getOrNull(index)?.let { wall ->
+                    val color = if (wall.widthMm > 0L) {
+                        DraftBeamColors.LaserCyan
+                    } else {
+                        Color(0xFFE0AF68)
+                    }
+                    val shapes = wallShapes[index]
+                    if (shapes.isEmpty()) {
+                        drawLine(color, viewport.project(wall.start, size), viewport.project(wall.end, size), 3.dp.toPx())
+                    } else {
+                        shapes.forEach { polygon ->
+                            for (edge in polygon.indices) {
+                                drawLine(color, viewport.project(polygon[edge], size),
+                                    viewport.project(polygon[(edge + 1) % polygon.size], size), 2.dp.toPx())
+                            }
+                        }
+                    }
+                    doorPlacementSpan?.let { span ->
+                        val mid = wall.widthMm / 2.0
+                        drawLine(
+                            color = color,
+                            start = viewport.project(
+                                PlanGeometry.wallPoint(wall, span.offsetMm.toDouble(), mid), size
+                            ),
+                            end = viewport.project(
+                                PlanGeometry.wallPoint(wall, span.offsetMm + span.holeLengthMm.toDouble(), mid), size
+                            ),
+                            strokeWidth = 5.dp.toPx()
+                        )
+                    }
+                    doorPlacementAnchor?.let { anchor ->
+                        val along = PlanGeometry.alongMm(wall, anchor).coerceIn(0.0, wall.lengthMm.toDouble())
+                        val point = viewport.project(PlanGeometry.wallPoint(wall, along, wall.widthMm / 2.0), size)
+                        drawCircle(DraftBeamColors.BackgroundDeep, 9.dp.toPx(), point)
+                        drawCircle(color, 7.dp.toPx(), point)
+                        drawCircle(DraftBeamColors.BackgroundDeep, 3.dp.toPx(), point)
+                    }
+                }
             }
         }
 
