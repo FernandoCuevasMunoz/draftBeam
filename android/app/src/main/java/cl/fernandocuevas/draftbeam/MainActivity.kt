@@ -194,6 +194,7 @@ class MainActivity : ComponentActivity() {
     private val selectedAngleDegrees = mutableStateOf(WallDirection.X_POSITIVE.angleDegrees)
     private val selectedWallIndex = mutableStateOf<Int?>(null)
     private val selectedNoteIndex = mutableStateOf<Int?>(null)
+    private val selectedDoorIndex = mutableStateOf<Int?>(null)
     private val wallEditorOpen = mutableStateOf(false)
     private val selectedStartPoint = mutableStateOf<PointMm?>(null)
     private val pendingEndpointMove = mutableStateOf<PendingEndpointMove?>(null)
@@ -479,6 +480,7 @@ class MainActivity : ComponentActivity() {
                     selectedAngleDegrees = selectedAngleDegrees.value,
                     selectedWallIndex = selectedWallIndex.value,
                     selectedNoteIndex = selectedNoteIndex.value,
+                    selectedDoorIndex = selectedDoorIndex.value,
                     wallEditorOpen = wallEditorOpen.value,
                     pendingEndpointMove = pendingEndpointMove.value,
                     lengthMeasurementEvent = lengthMeasurementEvent.value,
@@ -523,8 +525,17 @@ class MainActivity : ComponentActivity() {
                     onWallSelected = {
                         selectedWallIndex.value = it
                         selectedNoteIndex.value = null
+                        selectedDoorIndex.value = null
                         wallEditorOpen.value = false
                     },
+                    onDoorSelected = { index ->
+                        selectedDoorIndex.value = index
+                        selectedWallIndex.value = null
+                        selectedNoteIndex.value = null
+                        wallEditorOpen.value = false
+                    },
+                    onUpdateDoor = { index, door -> updatePlanDoor(index, door).also { status.value = it } },
+                    onDeleteDoor = { index -> deletePlanDoor(index).also { status.value = it } },
                     onNoteSelected = { index ->
                         selectedNoteIndex.value = index
                         selectedWallIndex.value = null
@@ -832,6 +843,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updatePlanDoor(index: Int, door: PlanDoor): String {
+        val current = planDoors.getOrNull(index) ?: return "La puerta seleccionada ya no existe."
+        return try {
+            if (door != current) {
+                pushPlanSnapshot()
+                planDoors[index] = door
+            }
+            "Puerta actualizada."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo actualizar la puerta."
+        }
+    }
+
+    private fun deletePlanDoor(index: Int): String {
+        if (index !in planDoors.indices) return "La puerta seleccionada ya no existe."
+        pushPlanSnapshot()
+        planDoors.removeAt(index)
+        selectedDoorIndex.value = null
+        return "Puerta eliminada; puedes deshacer esta acción."
+    }
+
     /** Adds a door measured in an existing gap; the plan keeps walls untouched. */
     private fun addPlanDoor(door: PlanDoor): String {
         return try {
@@ -949,6 +981,7 @@ class MainActivity : ComponentActivity() {
             planDoors.addAll(imported.doors)
             selectedWallIndex.value = null
             selectedNoteIndex.value = null
+            selectedDoorIndex.value = null
             wallEditorOpen.value = false
             pendingEndpointMove.value = null
             selectedStartPoint.value = imported.segments.lastOrNull()?.end
@@ -1127,6 +1160,7 @@ class MainActivity : ComponentActivity() {
         undoHistory.clear()
         selectedWallIndex.value = null
         selectedNoteIndex.value = null
+        selectedDoorIndex.value = null
         wallEditorOpen.value = false
         pendingEndpointMove.value = null
         selectedStartPoint.value = null
@@ -1243,6 +1277,7 @@ class MainActivity : ComponentActivity() {
         planDirty.value = true
         selectedWallIndex.value = null
         selectedNoteIndex.value = null
+        selectedDoorIndex.value = null
         wallEditorOpen.value = false
         pendingEndpointMove.value = null
         status.value = "Última acción del plano deshecha."
@@ -1282,6 +1317,7 @@ fun DraftBeamScreen(
     selectedAngleDegrees: Double,
     selectedWallIndex: Int?,
     selectedNoteIndex: Int?,
+    selectedDoorIndex: Int?,
     wallEditorOpen: Boolean,
     pendingEndpointMove: PendingEndpointMove?,
     lengthMeasurementEvent: LengthMeasurement?,
@@ -1321,7 +1357,10 @@ fun DraftBeamScreen(
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismissWallEditor: () -> Unit,
     onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit,
-    onDoorCreated: (PlanDoor) -> Unit
+    onDoorCreated: (PlanDoor) -> Unit,
+    onDoorSelected: (Int?) -> Unit,
+    onUpdateDoor: (Int, PlanDoor) -> String,
+    onDeleteDoor: (Int) -> String
 ) {
     val viewport = remember { PlanViewportState() }
     var snapOptions by remember { mutableStateOf(DraftSnapOptions()) }
@@ -1341,6 +1380,7 @@ fun DraftBeamScreen(
     // Door in an existing gap: two wall ends, two depth taps, then side and angle.
     var doorFlow by remember { mutableStateOf<DoorFlow?>(null) }
     var showDoorFrameWidthDialog by remember { mutableStateOf(false) }
+    var doorEditTarget by remember { mutableStateOf<Int?>(null) }
     var doorFrameWidthText by remember { mutableStateOf(PlanDoor.DEFAULT_FRAME_WIDTH_MM.toString()) }
     var focusWallWidth by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
@@ -1388,8 +1428,11 @@ fun DraftBeamScreen(
         onScanClick()
     }
     val editSelectedObject: () -> Unit = {
+        val doorIndex = selectedDoorIndex
         val noteIndex = selectedNoteIndex
-        if (noteIndex != null) {
+        if (doorIndex != null) {
+            doorEditTarget = doorIndex
+        } else if (noteIndex != null) {
             notes.getOrNull(noteIndex)?.let { note ->
                 noteEditIndex = noteIndex
                 noteTextDraft = note.text
@@ -1465,9 +1508,17 @@ fun DraftBeamScreen(
                             messageIsError = true
                         )
                     } else {
-                        // The frame depth is the wall thickness, so it stays flush with both faces.
+                        // The wall axis is one face, so the door moves half the thickness to the middle.
                         val depth = PlanDoors.depthAt(wallSegments, hinge, vertex)
-                        when (val gap = PlanDoors.fromGap(hinge, vertex, flow.frameWidthMm, depth)) {
+                        val shift = PlanDoors.centerOffset(wallSegments, hinge)
+                        val centeredHinge = PointMm(hinge.x + shift.x, hinge.y + shift.y)
+                        val centeredLatch = PointMm(vertex.x + shift.x, vertex.y + shift.y)
+                        when (val gap = PlanDoors.fromGap(
+                            centeredHinge,
+                            centeredLatch,
+                            flow.frameWidthMm,
+                            depth
+                        )) {
                             is DoorGapResult.Ready -> doorFlow = flow.copy(
                                 phase = DoorPhase.SWING,
                                 door = gap.door,
@@ -1679,6 +1730,8 @@ fun DraftBeamScreen(
                         pendingConnection = PendingConnection(start, freeEnd, target)
                     },
                     doors = doors,
+                    selectedDoorIndex = selectedDoorIndex,
+                    onDoorSelected = onDoorSelected,
                     doorPlacement = doorFlow?.let { flow ->
                         DoorPlacementOverlay(anchor = flow.hinge, preview = flow.door)
                     },
@@ -1722,6 +1775,16 @@ fun DraftBeamScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
+                            if (flow.phase == DoorPhase.SWING) {
+                                TextButton(
+                                    onClick = {
+                                        doorFlow = doorFlow?.let { current ->
+                                            current.door?.let { current.copy(door = PlanDoors.mirrored(it)) }
+                                                ?: current
+                                        }
+                                    }
+                                ) { Text("Invertir hoja") }
+                            }
                             TextButton(onClick = cancelDoorFlow) { Text("Cancelar") }
                         }
                     }
@@ -1821,7 +1884,7 @@ fun DraftBeamScreen(
 
             PlanActionBar(
                 hasWallSelection = selectedWallIndex != null,
-                hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null,
+                hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null || selectedDoorIndex != null,
                 canUndo = canUndo,
                 createMenuOpen = showCreateMenu,
                 onToggleCreateMenu = { showCreateMenu = !showCreateMenu },
@@ -1834,7 +1897,10 @@ fun DraftBeamScreen(
                     requestDoorFlow()
                 },
                 onEdit = editSelectedObject,
-                onDelete = onDeleteWallClick,
+                onDelete = {
+                    val doorIndex = selectedDoorIndex
+                    if (doorIndex != null) onDeleteDoor(doorIndex) else onDeleteWallClick()
+                },
                 onWidth = {
                     focusWallWidth = true
                     onEditWallClick()
@@ -2027,6 +2093,8 @@ fun DraftBeamScreen(
                                 pendingConnection = PendingConnection(start, freeEnd, target)
                             },
                             doors = doors,
+                            selectedDoorIndex = selectedDoorIndex,
+                            onDoorSelected = onDoorSelected,
                             doorPlacement = doorFlow?.let { flow ->
                                 DoorPlacementOverlay(anchor = flow.hinge, preview = flow.door)
                             },
@@ -2046,7 +2114,7 @@ fun DraftBeamScreen(
                     }
                     PlanActionBar(
                         hasWallSelection = selectedWallIndex != null,
-                        hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null,
+                        hasAnySelection = selectedWallIndex != null || selectedNoteIndex != null || selectedDoorIndex != null,
                         canUndo = canUndo,
                         createMenuOpen = showCreateMenu,
                         onToggleCreateMenu = { showCreateMenu = !showCreateMenu },
@@ -2061,7 +2129,10 @@ fun DraftBeamScreen(
                             requestDoorFlow()
                         },
                         onEdit = editSelectedObject,
-                        onDelete = onDeleteWallClick,
+                        onDelete = {
+                            val doorIndex = selectedDoorIndex
+                            if (doorIndex != null) onDeleteDoor(doorIndex) else onDeleteWallClick()
+                        },
                         onWidth = {
                             focusWallWidth = true
                             onEditWallClick()
@@ -2154,6 +2225,31 @@ fun DraftBeamScreen(
             onDeleteOpening = { openingIndex -> onDeleteOpening(selectedWallIndex, openingIndex) },
             onDelete = onDeleteWallClick
         )
+    }
+
+    doorEditTarget?.let { index ->
+        val door = doors.getOrNull(index)
+        if (door == null) {
+            doorEditTarget = null
+        } else {
+            DoorEditSheet(
+                door = door,
+                onDismiss = { doorEditTarget = null },
+                onSave = { updated ->
+                    val result = onUpdateDoor(index, updated)
+                    if (result.startsWith("Puerta")) {
+                        doorEditTarget = null
+                        null
+                    } else {
+                        result
+                    }
+                },
+                onDelete = {
+                    doorEditTarget = null
+                    onDeleteDoor(index)
+                }
+            )
+        }
     }
 
     if (showDoorFrameWidthDialog) {

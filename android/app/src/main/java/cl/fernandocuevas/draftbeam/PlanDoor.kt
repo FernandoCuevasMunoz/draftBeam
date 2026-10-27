@@ -171,6 +171,35 @@ object PlanDoors {
         )
     }
 
+    /**
+     * Shift from the wall axis to the middle of its thickness. The axis is a face, not
+     * the centerline: the wall grows toward [WallGrowthSide] from it, so a door measured
+     * on wall vertices has to be moved half the wall thickness to stay flush with both
+     * faces. Returns the origin vector when the point is not a wall end.
+     */
+    fun centerOffset(segments: List<WallSegment>, at: PointMm): PointMm {
+        val wall = segments.firstOrNull { it.start == at || it.end == at } ?: return PointMm(0.0, 0.0)
+        if (wall.widthMm <= 0L) return PointMm(0.0, 0.0)
+        val dx = wall.end.x - wall.start.x
+        val dy = wall.end.y - wall.start.y
+        val length = hypot(dx, dy)
+        if (length <= 0.0) return PointMm(0.0, 0.0)
+        val side = if (wall.growthSide == WallGrowthSide.LEFT) 1.0 else -1.0
+        val half = wall.widthMm / 2.0
+        return PointMm(-dy / length * side * half, dx / length * side * half)
+    }
+
+    /**
+     * Mirror copy: the leaf hangs from the other end while staying on the same side of
+     * the wall. Reversing the axis flips the counter-clockwise direction, so the angle
+     * is reflected as well.
+     */
+    fun mirrored(door: PlanDoor): PlanDoor = door.copy(
+        hinge = door.latch,
+        latch = door.hinge,
+        openAngleDegrees = (360.0 - door.openAngleDegrees) % 360.0
+    )
+
     /** Width of a wall that starts or ends exactly on [point], or null when there is none. */
     fun wallWidthAt(segments: List<WallSegment>, point: PointMm): Long? = segments
         .filter { it.start == point || it.end == point }

@@ -138,6 +138,55 @@ class PlanDoorTest {
         assertThrows(IllegalArgumentException::class.java) { door.copy(openAngleDegrees = -1.0) }
     }
 
+    @Test
+    fun theDoorSitsInTheMiddleOfTheWallThickness() {
+        // The wall axis is its near face: the body grows 100 mm toward the growth side.
+        val wall = WallSegment(PointMm(0.0, 0.0), PointMm(1_000.0, 0.0), 1_000, 0.0, 100)
+        val shift = PlanDoors.centerOffset(listOf(wall), wall.end)
+        assertEquals(0.0, shift.x, 0.0001)
+        assertEquals(50.0, shift.y, 0.0001)
+
+        // A wall that grows to the other side moves the door the other way.
+        val mirroredSide = wall.copy(growthSide = WallGrowthSide.RIGHT)
+        assertEquals(-50.0, PlanDoors.centerOffset(listOf(mirroredSide), mirroredSide.end).y, 0.0001)
+
+        // A vertical wall moves the door along X.
+        val vertical = WallSegment(PointMm(0.0, 0.0), PointMm(0.0, 1_000.0), 1_000, 90.0, 100)
+        val verticalShift = PlanDoors.centerOffset(listOf(vertical), vertical.end)
+        assertEquals(-50.0, verticalShift.x, 0.0001)
+        assertEquals(0.0, verticalShift.y, 0.0001)
+
+        // No wall or no thickness: nothing to shift.
+        assertEquals(PointMm(0.0, 0.0), PlanDoors.centerOffset(listOf(wall.copy(widthMm = 0)), wall.end))
+        assertEquals(PointMm(0.0, 0.0), PlanDoors.centerOffset(emptyList(), wall.end))
+    }
+
+    @Test
+    fun theMirrorMovesTheHingeToTheOtherEndAndKeepsTheLeafOnItsSide() {
+        val original = door.copy(openAngleDegrees = 90.0)
+        val mirrored = PlanDoors.mirrored(original)
+
+        assertEquals(original.latch, mirrored.hinge)
+        assertEquals(original.hinge, mirrored.latch)
+        assertEquals(270.0, mirrored.openAngleDegrees, 0.0001)
+        assertEquals(original.gapLengthMm, mirrored.gapLengthMm, 0.0001)
+        assertEquals(original.leafLengthMm, mirrored.leafLengthMm, 0.0001)
+
+        // Both leaves stay on the same side of the wall, only the hinge changes end.
+        val originalEnd = PlanDoors.geometry(original).arc.last()
+        val mirroredEnd = PlanDoors.geometry(mirrored).arc.last()
+        assertEquals(1_050.0, originalEnd.x, 0.0001)
+        assertEquals(700.0, originalEnd.y, 0.0001)
+        assertEquals(1_750.0, mirroredEnd.x, 0.0001)
+        assertEquals(700.0, mirroredEnd.y, 0.0001)
+
+        // Mirroring twice returns the original door.
+        assertEquals(original, PlanDoors.mirrored(mirrored))
+        // A closed or fully turned leaf survives the reflection.
+        assertEquals(0.0, PlanDoors.mirrored(door.copy(openAngleDegrees = 0.0)).openAngleDegrees, 0.0001)
+        assertEquals(180.0, PlanDoors.mirrored(door.copy(openAngleDegrees = 180.0)).openAngleDegrees, 0.0001)
+    }
+
     private fun assertPoint(x: Double, y: Double, door: PlanDoor) {
         val end = PlanDoors.geometry(door).arc.last()
         assertEquals(x, end.x, 0.0001)
