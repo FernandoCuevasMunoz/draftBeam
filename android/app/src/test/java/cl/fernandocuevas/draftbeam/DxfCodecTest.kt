@@ -13,8 +13,7 @@ class DxfCodecTest {
             latch = PointMm(1_800.0, 0.0),
             frameWidthMm = 50,
             depthMm = 100,
-            openAngleDegrees = 45.0,
-            swingSign = -1,
+            openAngleDegrees = 180.0,
             leafThicknessMm = 40
         )
         val window = WindowOpening(1_200, 1_000, OpeningAlignment.FAR_FACE, 60)
@@ -29,16 +28,16 @@ class DxfCodecTest {
         assertEquals(listOf(wall), imported.segments)
         assertEquals(listOf(door), imported.doors)
         assertTrue(imported.warnings.isEmpty())
-        assertTrue(dxf.contains("\n1001\nDRAFTBEAM\n1000\nDBO4;DOOR;1000;0;1800;0;50;100;45;-1;40"))
-        assertTrue(dxf.contains("\nFDXL_DOORS\n"))
-        assertEquals(1, entitiesOfType(dxf, "ARC").count { arc -> arc[8] == "FDXL_DOORS" && arc[40] == "700" })
+        assertTrue(dxf.contains("\n1001\nDRAFTBEAM\n1000\nDBO5;DOOR;1000;0;1800;0;50;100;180;40"))
+        assertTrue(dxf.contains("\nFDXL_PUERTA\n"))
+        assertEquals(1, entitiesOfType(dxf, "ARC").count { arc -> arc[8] == "FDXL_PUERTA" && arc[40] == "700" })
         // Two frame blocks plus the open leaf.
         assertEquals(3, entitiesOfType(dxf, "LWPOLYLINE").count { polyline ->
-            polyline[8] == "FDXL_DOORS" && polyline[90] == "4"
+            polyline[8] == "FDXL_PUERTA" && polyline[90] == "4"
         })
         // A door whose metadata no longer fits its own gap is dropped with a notice.
         val corrupted = DxfCodec.decode(
-            dxf.replace("DBO4;DOOR;1000;0;1800;0;50;100", "DBO4;DOOR;1000;0;1010;0;50;100")
+            dxf.replace("DBO5;DOOR;1000;0;1800;0;50;100", "DBO5;DOOR;1000;0;1010;0;50;100")
         )
         assertTrue(corrupted.doors.isEmpty())
         assertTrue(corrupted.warnings.any { it.contains("1 puertas") })

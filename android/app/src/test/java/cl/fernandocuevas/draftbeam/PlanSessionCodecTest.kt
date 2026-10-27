@@ -33,8 +33,7 @@ class PlanSessionCodecTest {
                     latch = PointMm(1_800.0, 0.0),
                     frameWidthMm = 50,
                     depthMm = 100,
-                    openAngleDegrees = 45.5,
-                    swingSign = -1,
+                    openAngleDegrees = 270.0,
                     leafThicknessMm = 40
                 )
             )
@@ -48,7 +47,7 @@ class PlanSessionCodecTest {
         val valid = PlanSessionCodec.encode(PlanSession(emptyList(), emptyList(), null, null))
         assertThrows(Exception::class.java) { PlanSessionCodec.decode(valid.copyOf(6)) }
         assertThrows(IllegalArgumentException::class.java) {
-            PlanSessionCodec.decode(valid.copyOf().also { it[3] = 6 })
+            PlanSessionCodec.decode(valid.copyOf().also { it[3] = 7 })
         }
     }
 

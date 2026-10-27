@@ -15,25 +15,22 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import cl.fernandocuevas.draftbeam.ui.theme.DraftBeamColors
 
-/** Steps of the door-in-a-gap flow: two wall ends, two depth taps, then side and angle. */
-enum class DoorPhase { GAP_FIRST, GAP_SECOND, DEPTH, SWING }
+/** Steps of the door-in-a-gap flow: two wall ends, then side and angle. */
+enum class DoorPhase { GAP_FIRST, GAP_SECOND, SWING }
 
-/** Measurement state while the user marks the gap and the depth of the door. */
+/** Measurement state while the user marks the gap of the door. */
 data class DoorFlow(
     val phase: DoorPhase,
     val frameWidthMm: Long,
     val hinge: PointMm? = null,
-    val depthMarks: List<PointMm> = emptyList(),
-    val proposedDepthMm: Long = PlanDoor.DEFAULT_DEPTH_MM,
     val door: PlanDoor? = null,
     val message: String? = null,
     val messageIsError: Boolean = false
 )
 
-/** What the canvas has to show while the flow is running: anchor, depth marks and preview. */
+/** What the canvas has to show while the flow is running: the anchor and the preview. */
 data class DoorPlacementOverlay(
     val anchor: PointMm? = null,
-    val depthMarks: List<PointMm> = emptyList(),
     val preview: PlanDoor? = null
 )
 
@@ -52,8 +49,8 @@ internal fun DoorFrameWidthDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "El vano se mide entre los extremos de dos muros ya dibujados. Después elegís la " +
-                        "profundidad y el lado de apertura.",
+                    "El vano se mide entre los extremos de dos muros ya dibujados. La profundidad del " +
+                        "marco toma el ancho del muro y después elegís hacia dónde abre.",
                     style = MaterialTheme.typography.bodySmall,
                     color = DraftBeamColors.TextSecondary
                 )

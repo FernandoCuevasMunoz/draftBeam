@@ -16,7 +16,7 @@ data class PlanSession(
 )
 
 object PlanSessionCodec {
-    private const val VERSION = 5
+    private const val VERSION = 6
     private const val MAX_ITEMS = 100_000
     private const val TYPE_DOOR = 1
     private const val TYPE_WINDOW = 2
@@ -60,7 +60,6 @@ object PlanSessionCodec {
                 output.writeLong(door.frameWidthMm)
                 output.writeLong(door.depthMm)
                 output.writeDouble(door.openAngleDegrees)
-                output.writeInt(door.swingSign)
                 output.writeLong(door.leafThicknessMm)
             }
             output.writeInt(session.notes.size)
@@ -97,8 +96,8 @@ object PlanSessionCodec {
                 widthMm = width, growthSide = side, openings = openings
             ).also(PlanGeometry::validateOpenings)
         }
-        val doors = if (version >= 5) {
-            List(input.readCount()) {
+        val doors = when {
+            version >= 6 -> List(input.readCount()) {
                 try {
                     PlanDoor(
                         hinge = input.readPoint(),
@@ -106,7 +105,6 @@ object PlanSessionCodec {
                         frameWidthMm = input.readLong(),
                         depthMm = input.readLong(),
                         openAngleDegrees = input.readDouble(),
-                        swingSign = input.readInt(),
                         leafThicknessMm = input.readLong()
                     )
                 } catch (_: IllegalArgumentException) {
@@ -114,8 +112,19 @@ object PlanSessionCodec {
                     null
                 }
             }.filterNotNull()
-        } else {
-            emptyList()
+            // Version 5 stored a swing sign that no longer exists; those doors are dropped.
+            version == 5 -> List(input.readCount()) {
+                input.readPoint()
+                input.readPoint()
+                input.readLong()
+                input.readLong()
+                input.readDouble()
+                input.readInt()
+                input.readLong()
+                droppedDoors++
+                null
+            }.filterNotNull()
+            else -> emptyList()
         }
         val notes = List(input.readCount()) {
             PlanNote(input.readUTF(), input.readPoint(), input.readDouble(), input.readDouble())

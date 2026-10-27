@@ -532,11 +532,6 @@ fun PlanPreview(
                 drawCircle(DraftBeamColors.LaserCyan, 7.dp.toPx(), point)
                 drawCircle(DraftBeamColors.BackgroundDeep, 3.dp.toPx(), point)
             }
-            overlay.depthMarks.forEach { mark ->
-                val point = viewport.project(mark, size)
-                drawCircle(DraftBeamColors.BackgroundDeep, 7.dp.toPx(), point)
-                drawCircle(Color(0xFFE0AF68), 5.dp.toPx(), point)
-            }
         }
 
         selectedSegmentIndex?.let { index ->

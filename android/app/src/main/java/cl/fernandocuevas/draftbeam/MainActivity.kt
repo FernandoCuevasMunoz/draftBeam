@@ -1432,37 +1432,12 @@ fun DraftBeamScreen(
         )
     }
 
-    /** Proposed frame depth: the width of the walls that hold the gap, when they agree. */
-    val proposedDepth: (PointMm, PointMm) -> Long = { hinge, latch ->
-        val left = PlanDoors.wallWidthAt(wallSegments, hinge)
-        val right = PlanDoors.wallWidthAt(wallSegments, latch)
-        when {
-            left != null && right != null -> if (left == right) left else minOf(left, right)
-            left != null -> left
-            right != null -> right
-            else -> PlanDoor.DEFAULT_DEPTH_MM
-        }
-    }
-
     val commitDoor: (PlanDoor?) -> Unit = { door ->
         if (door != null) onDoorCreated(door)
         doorFlow = null
     }
 
-    val acceptProposedDepth: () -> Unit = {
-        val flow = doorFlow
-        val door = flow?.door
-        if (flow != null && door != null) {
-            doorFlow = flow.copy(
-                phase = DoorPhase.SWING,
-                depthMarks = emptyList(),
-                message = "Profundidad de ${door.depthMm} mm. Movés el dedo para elegir el lado y el " +
-                    "ángulo de apertura; tocá para confirmar."
-            )
-        }
-    }
-
-    /** Gap taps snap to wall ends, depth taps measure across, and the last tap confirms. */
+    /** Gap taps snap to wall ends; after the gap, one tap confirms the chosen angle. */
     val handleDoorTapped: (PointMm, PointMm?) -> Unit = { world, vertex ->
         val flow = doorFlow
         if (flow != null) {
@@ -1490,58 +1465,22 @@ fun DraftBeamScreen(
                             messageIsError = true
                         )
                     } else {
-                        val depth = proposedDepth(hinge, vertex)
+                        // The frame depth is the wall thickness, so it stays flush with both faces.
+                        val depth = PlanDoors.depthAt(wallSegments, hinge, vertex)
                         when (val gap = PlanDoors.fromGap(hinge, vertex, flow.frameWidthMm, depth)) {
                             is DoorGapResult.Ready -> doorFlow = flow.copy(
-                                phase = DoorPhase.DEPTH,
+                                phase = DoorPhase.SWING,
                                 door = gap.door,
-                                proposedDepthMm = depth,
                                 message = "Vano de ${gap.door.gapLengthMm.roundToLong()} mm, hoja de " +
-                                    "${gap.door.leafLengthMm.roundToLong()} mm. Tocá dos puntos a los lados " +
-                                    "del muro para medir la profundidad, o usá los $depth mm propuestos.",
+                                    "${gap.door.leafLengthMm.roundToLong()} mm y marco de " +
+                                    "${gap.door.frameWidthMm} × $depth mm. Movés el dedo para elegir hacia " +
+                                    "dónde abre (pasos de 90°) y tocá para confirmar.",
                                 messageIsError = false
                             )
                             is DoorGapResult.Rejected -> doorFlow = flow.copy(
                                 message = gap.message,
                                 messageIsError = true
                             )
-                        }
-                    }
-                }
-                DoorPhase.DEPTH -> {
-                    val door = flow.door
-                    if (door == null) {
-                        doorFlow = null
-                    } else if (flow.depthMarks.isEmpty()) {
-                        doorFlow = flow.copy(
-                            depthMarks = listOf(world),
-                            message = "Ahora tocá el lado opuesto del muro.",
-                            messageIsError = false
-                        )
-                    } else {
-                        val depth = PlanDoors.depthFromTaps(door, flow.depthMarks.first(), world)
-                        if (depth == null) {
-                            doorFlow = flow.copy(
-                                depthMarks = emptyList(),
-                                message = "La profundidad debe medir al menos ${PlanDoor.MIN_DEPTH_MM} mm. " +
-                                    "Tocá otra vez los dos lados del muro.",
-                                messageIsError = true
-                            )
-                        } else {
-                            when (val rebuilt = PlanDoors.fromGap(door.hinge, door.latch, door.frameWidthMm, depth)) {
-                                is DoorGapResult.Ready -> doorFlow = flow.copy(
-                                    phase = DoorPhase.SWING,
-                                    depthMarks = emptyList(),
-                                    door = rebuilt.door,
-                                    message = "Profundidad de $depth mm. Movés el dedo para elegir el lado y " +
-                                        "el ángulo de apertura; tocá para confirmar.",
-                                    messageIsError = false
-                                )
-                                is DoorGapResult.Rejected -> doorFlow = flow.copy(
-                                    message = rebuilt.message,
-                                    messageIsError = true
-                                )
-                            }
                         }
                     }
                 }
@@ -1741,11 +1680,7 @@ fun DraftBeamScreen(
                     },
                     doors = doors,
                     doorPlacement = doorFlow?.let { flow ->
-                        DoorPlacementOverlay(
-                            anchor = flow.hinge,
-                            depthMarks = flow.depthMarks,
-                            preview = flow.door
-                        )
+                        DoorPlacementOverlay(anchor = flow.hinge, preview = flow.door)
                     },
                     onDoorTap = handleDoorTapped,
                     onDoorPointerMoved = handleDoorPointerMoved,
@@ -1787,11 +1722,6 @@ fun DraftBeamScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
-                            if (flow.phase == DoorPhase.DEPTH) {
-                                TextButton(onClick = acceptProposedDepth) {
-                                    Text("Usar ${flow.proposedDepthMm} mm")
-                                }
-                            }
                             TextButton(onClick = cancelDoorFlow) { Text("Cancelar") }
                         }
                     }
@@ -2098,11 +2028,7 @@ fun DraftBeamScreen(
                             },
                             doors = doors,
                             doorPlacement = doorFlow?.let { flow ->
-                                DoorPlacementOverlay(
-                                    anchor = flow.hinge,
-                                    depthMarks = flow.depthMarks,
-                                    preview = flow.door
-                                )
+                                DoorPlacementOverlay(anchor = flow.hinge, preview = flow.door)
                             },
                             onDoorTap = handleDoorTapped,
                             onDoorPointerMoved = handleDoorPointerMoved,

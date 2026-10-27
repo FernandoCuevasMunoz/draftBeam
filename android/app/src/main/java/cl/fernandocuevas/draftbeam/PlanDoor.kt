@@ -1,6 +1,5 @@
 package cl.fernandocuevas.draftbeam
 
-import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -11,10 +10,11 @@ import kotlin.math.sin
  * Door placed in a gap that already exists between two wall ends: wall, opening,
  * wall. The gap is measured between the two snapped wall vertices, the frame
  * consumes [frameWidthMm] at each end (so the leaf is shorter than the gap) and
- * the depth comes from the wall thickness measured across the gap.
+ * [depthMm] is the wall thickness, so the frame stays flush with both wall faces.
  *
- * The leaf turns on the frame face at [hinge] and opens toward the side given by
- * [swingSign], where +1 is the counter-clockwise normal of hinge → latch.
+ * The leaf turns on the frame face at [hinge] and [openAngleDegrees] is its
+ * counter-clockwise rotation from the closed position (hinge → latch): 0 and 360
+ * closed, 90 and 270 perpendicular on either side, 180 back over the gap.
  */
 data class PlanDoor(
     val hinge: PointMm,
@@ -22,7 +22,6 @@ data class PlanDoor(
     val frameWidthMm: Long,
     val depthMm: Long,
     val openAngleDegrees: Double = 90.0,
-    val swingSign: Int = 1,
     val leafThicknessMm: Long = DEFAULT_LEAF_THICKNESS_MM
 ) {
     val gapLengthMm: Double get() = hypot(latch.x - hinge.x, latch.y - hinge.y)
@@ -36,10 +35,9 @@ data class PlanDoor(
         require(leafLengthMm >= MIN_LEAF_LENGTH_MM - 1e-6) {
             "El marco deja la hoja con menos de $MIN_LEAF_LENGTH_MM mm."
         }
-        require(openAngleDegrees.isFinite() && openAngleDegrees > 0.0 && openAngleDegrees <= 180.0) {
-            "El ángulo de apertura debe estar entre 1° y 180°."
+        require(openAngleDegrees.isFinite() && openAngleDegrees in 0.0..360.0) {
+            "El ángulo de apertura debe estar entre 0° y 360°."
         }
-        require(swingSign == 1 || swingSign == -1) { "El lado de apertura es inválido." }
         require(leafThicknessMm > 0L && leafThicknessMm <= depthMm) {
             "El espesor de la hoja debe caber en la profundidad."
         }
@@ -51,7 +49,8 @@ data class PlanDoor(
         const val DEFAULT_DEPTH_MM = 100L
         const val MIN_LEAF_LENGTH_MM = 100.0
         const val MIN_DEPTH_MM = 20L
-        const val TAP_ROUNDING_MM = 10L
+        /** The pointer snaps the leaf to these directions, like a CAD ortho toggle. */
+        const val ANGLE_STEP_DEGREES = 90.0
     }
 }
 
@@ -103,29 +102,30 @@ object PlanDoors {
     /** Hinge point of the open leaf: the inner face of the frame at the hinge end. */
     fun pivot(door: PlanDoor): PointMm = planeOf(door).at(door.frameWidthMm.toDouble(), 0.0)
 
-    /**
-     * Frame depth measured with two taps across the gap. The door stays centred on
-     * the wall axis that joins both vertices, so only the distance between the taps
-     * matters and any asymmetry is discarded.
-     */
-    fun depthFromTaps(door: PlanDoor, first: PointMm, second: PointMm): Long? {
-        val plane = planeOf(door)
-        val distance = abs(plane.coordinatesOf(first).second - plane.coordinatesOf(second).second)
-        val rounded = (distance / PlanDoor.TAP_ROUNDING_MM).roundToLong() * PlanDoor.TAP_ROUNDING_MM
-        return rounded.takeIf { it >= PlanDoor.MIN_DEPTH_MM }
+    /** Wall thickness that holds the gap, so the frame stays flush with both faces. */
+    fun depthAt(segments: List<WallSegment>, hinge: PointMm, latch: PointMm): Long {
+        val left = wallWidthAt(segments, hinge)
+        val right = wallWidthAt(segments, latch)
+        return when {
+            left != null && right != null -> maxOf(left, right)
+            left != null -> left
+            right != null -> right
+            else -> PlanDoor.DEFAULT_DEPTH_MM
+        }
     }
 
-    /** Side and angle from the pointer that follows the leaf, like the ADT2 cursor flip. */
+    /**
+     * Angle and side from the pointer that follows the leaf. The pointer declares
+     * which way the leaf turns and the value snaps to [PlanDoor.ANGLE_STEP_DEGREES].
+     */
     fun toward(door: PlanDoor, pointer: PointMm): PlanDoor {
         val plane = planeOf(door)
-        val (along, across) = plane.coordinatesOf(pointer)
-            .let { (u, v) -> (u - door.frameWidthMm) to v }
-        val swing = if (across < 0.0) -1 else 1
-        val degrees = Math.toDegrees(atan2(abs(across), along)).coerceIn(1.0, 180.0)
-        return door.copy(
-            swingSign = swing,
-            openAngleDegrees = (degrees * 10.0).roundToLong() / 10.0
-        )
+        val (u, v) = plane.coordinatesOf(pointer)
+        val degrees = Math.toDegrees(atan2(v, u - door.frameWidthMm))
+        val normalized = ((degrees % 360.0) + 360.0) % 360.0
+        val snapped = (normalized / PlanDoor.ANGLE_STEP_DEGREES).roundToLong() *
+            PlanDoor.ANGLE_STEP_DEGREES % 360.0
+        return door.copy(openAngleDegrees = snapped)
     }
 
     /** Frame blocks, leaf and arc; arc angles are DXF-ready counter-clockwise angles. */
@@ -136,17 +136,16 @@ object PlanDoors {
         val halfDepth = door.depthMm / 2.0
         val leafLength = door.leafLengthMm
         val thickness = door.leafThicknessMm.toDouble()
-        val swing = door.swingSign.toDouble()
         val angle = Math.toRadians(door.openAngleDegrees)
 
         val frames = listOf(
             framePolygon(plane, from = 0.0, to = frameWidth, halfDepth = halfDepth),
             framePolygon(plane, from = gap - frameWidth, to = gap, halfDepth = halfDepth)
         )
-        // u runs along the leaf, w across it toward the side the door opens.
+        // u runs along the leaf and w across it; the leaf turns counter-clockwise.
         fun rotated(u: Double, w: Double, rotation: Double): PointMm = plane.at(
             frameWidth + u * cos(rotation) - w * sin(rotation),
-            swing * (u * sin(rotation) + w * cos(rotation))
+            u * sin(rotation) + w * cos(rotation)
         )
 
         val leaf = listOf(
@@ -159,7 +158,7 @@ object PlanDoors {
 
         // Rotating from the gap axis toward the left normal is counter-clockwise.
         val closedDegrees = Math.toDegrees(atan2(plane.along.y, plane.along.x))
-        val sweep = Math.toDegrees(angle) * swing
+        val sweep = door.openAngleDegrees
         return DoorPlanGeometry(
             frames = frames,
             leaf = leaf,
@@ -167,8 +166,8 @@ object PlanDoors {
             opening = OpeningLine(door.hinge, door.latch),
             pivot = pivot(door),
             radiusMm = leafLength,
-            arcStartDegrees = PlanGeometry.normalizeAngle(if (sweep >= 0.0) closedDegrees else closedDegrees + sweep),
-            arcEndDegrees = PlanGeometry.normalizeAngle(if (sweep >= 0.0) closedDegrees + sweep else closedDegrees)
+            arcStartDegrees = PlanGeometry.normalizeAngle(closedDegrees),
+            arcEndDegrees = PlanGeometry.normalizeAngle(closedDegrees + sweep)
         )
     }
 

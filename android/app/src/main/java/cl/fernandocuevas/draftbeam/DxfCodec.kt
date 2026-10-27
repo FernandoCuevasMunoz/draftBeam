@@ -22,7 +22,8 @@ object DxfCodec {
     private const val WALL_LAYER_PREFIX = "FDXL_WALL_"
     private const val VISIBLE_LAYER_PREFIX = "FDXL_VISIBLE_"
     private const val OPENING_LAYER = "FDXL_OPENINGS"
-    private const val DOOR_LAYER = "FDXL_DOORS"
+    /** Single door layer: frames, leaves, arcs and metadata of every door. */
+    private const val DOOR_LAYER = "FDXL_PUERTA"
     private const val OPENING_APP_ID = "DRAFTBEAM"
 
     fun encode(
@@ -321,7 +322,7 @@ object DxfCodec {
         entities.forEach { entity ->
             val metadata = (entity as? DxfLine)?.openings ?: return@forEach
             metadata.forEach { value ->
-                if (value.startsWith("DBO4;")) {
+                if (value.startsWith("DBO5;")) {
                     val decoded = decodeDoor(value, unitScale)
                     if (decoded != null) doors += decoded else droppedDoors++
                 }
@@ -619,17 +620,17 @@ object DxfCodec {
     }
 
     private fun encodeDoor(door: PlanDoor): String = listOf(
-        "DBO4", "DOOR",
+        "DBO5", "DOOR",
         number(door.hinge.x), number(door.hinge.y),
         number(door.latch.x), number(door.latch.y),
         door.frameWidthMm, door.depthMm,
-        number(door.openAngleDegrees), door.swingSign, door.leafThicknessMm
+        number(door.openAngleDegrees), door.leafThicknessMm
     ).joinToString(";")
 
-    /** Reads `DBO4;DOOR;hx;hy;lx;ly;frame;depth;angle;swing;thickness`, or null when it is unusable. */
+    /** Reads `DBO5;DOOR;hx;hy;lx;ly;frame;depth;angle;thickness`, or null when it is unusable. */
     private fun decodeDoor(value: String, unitScale: Double): PlanDoor? {
         val fields = value.split(';')
-        if (fields.size != 11 || fields[0] != "DBO4" || fields[1] != "DOOR") return null
+        if (fields.size != 10 || fields[0] != "DBO5" || fields[1] != "DOOR") return null
         return try {
             PlanDoor(
                 hinge = PointMm(fields[2].toDouble() * unitScale, fields[3].toDouble() * unitScale),
@@ -637,8 +638,7 @@ object DxfCodec {
                 frameWidthMm = (fields[6].toDouble() * unitScale).roundToLong(),
                 depthMm = (fields[7].toDouble() * unitScale).roundToLong(),
                 openAngleDegrees = fields[8].toDouble(),
-                swingSign = fields[9].toInt(),
-                leafThicknessMm = (fields[10].toDouble() * unitScale).roundToLong()
+                leafThicknessMm = (fields[9].toDouble() * unitScale).roundToLong()
             )
         } catch (_: IllegalArgumentException) {
             null
@@ -691,6 +691,7 @@ object DxfCodec {
             // Doors of the two removed designs carried their metadata on a wall axis.
             "DBO3" -> null
             "DBO4" -> null
+            "DBO5" -> null
             else -> throw IllegalArgumentException("Vano DXF no compatible.")
         }
     }
@@ -710,7 +711,7 @@ object DxfCodec {
     }
 
     private fun StringBuilder.appendArc(layer: String, geometry: DoorPlanGeometry) {
-        if (geometry.arc.size < 2) return
+        if (geometry.arc.size < 2 || geometry.arcStartDegrees == geometry.arcEndDegrees) return
         pair(0, "ARC")
         pair(100, "AcDbEntity")
         pair(8, layer)
