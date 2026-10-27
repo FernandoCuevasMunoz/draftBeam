@@ -154,11 +154,18 @@ object PlanDoors {
             rotated(leafLength, thickness, angle),
             rotated(0.0, thickness, angle)
         )
-        val arc = (0..ARC_STEPS).map { step -> rotated(leafLength, 0.0, angle * step / ARC_STEPS) }
+        // The leaf position is the chosen angle, but the swing arc always takes the
+        // short way from closed, so 270° draws a quarter circle and not three quarters.
+        val sweepDegrees = if (door.openAngleDegrees <= 180.0) {
+            door.openAngleDegrees
+        } else {
+            door.openAngleDegrees - 360.0
+        }
+        val sweepRadians = Math.toRadians(sweepDegrees)
+        val arc = (0..ARC_STEPS).map { step -> rotated(leafLength, 0.0, sweepRadians * step / ARC_STEPS) }
 
         // Rotating from the gap axis toward the left normal is counter-clockwise.
         val closedDegrees = Math.toDegrees(atan2(plane.along.y, plane.along.x))
-        val sweep = door.openAngleDegrees
         return DoorPlanGeometry(
             frames = frames,
             leaf = leaf,
@@ -166,8 +173,12 @@ object PlanDoors {
             opening = OpeningLine(door.hinge, door.latch),
             pivot = pivot(door),
             radiusMm = leafLength,
-            arcStartDegrees = PlanGeometry.normalizeAngle(closedDegrees),
-            arcEndDegrees = PlanGeometry.normalizeAngle(closedDegrees + sweep)
+            arcStartDegrees = PlanGeometry.normalizeAngle(
+                if (sweepDegrees >= 0.0) closedDegrees else closedDegrees + sweepDegrees
+            ),
+            arcEndDegrees = PlanGeometry.normalizeAngle(
+                if (sweepDegrees >= 0.0) closedDegrees + sweepDegrees else closedDegrees
+            )
         )
     }
 

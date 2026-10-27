@@ -111,9 +111,29 @@ class PlanDoorTest {
         assertEquals(180.0, half.arcEndDegrees, 0.0001)
         val closed = PlanDoors.geometry(door.copy(openAngleDegrees = 0.0))
         assertEquals(closed.arcStartDegrees, closed.arcEndDegrees, 0.0001)
+        // 270° opens down: the arc takes the short way, so it starts at 270 and ends at 0.
+        val down = PlanDoors.geometry(door.copy(openAngleDegrees = 270.0))
+        assertEquals(270.0, down.arcStartDegrees, 0.0001)
+        assertEquals(0.0, down.arcEndDegrees, 0.0001)
         val reversed = PlanDoors.geometry(door.copy(hinge = latch, latch = hinge))
         assertEquals(180.0, reversed.arcStartDegrees, 0.0001)
         assertEquals(270.0, reversed.arcEndDegrees, 0.0001)
+    }
+
+    @Test
+    fun theMirroredDoorDrawsAQuarterCircleAndNotThreeQuarters() {
+        val mirrored = PlanDoors.mirrored(door.copy(openAngleDegrees = 90.0))
+        val geometry = PlanDoors.geometry(mirrored)
+
+        // The arc is a quarter circle: 90° of sweep, never crossing the wall line.
+        val span = ((geometry.arcEndDegrees - geometry.arcStartDegrees) % 360.0 + 360.0) % 360.0
+        assertEquals(90.0, span, 0.0001)
+        geometry.arc.forEach { point ->
+            assertTrue("el arco no debe cruzar el muro: ${point.y}", point.y >= -0.0001)
+        }
+        // ... and it ends exactly on the open leaf.
+        assertEquals(geometry.leaf[1].x, geometry.arc.last().x, 0.0001)
+        assertEquals(geometry.leaf[1].y, geometry.arc.last().y, 0.0001)
     }
 
     @Test
