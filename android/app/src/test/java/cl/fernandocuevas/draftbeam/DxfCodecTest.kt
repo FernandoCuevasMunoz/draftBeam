@@ -7,59 +7,60 @@ import org.junit.Test
 
 class DxfCodecTest {
     @Test
-    fun doorsAndWindowsRoundTripWithoutTurningGraphicsIntoExtraWalls() {
-        val door = DoorOpening(
-            offsetMm = 0,
-            holeLengthMm = 800,
-            hingeAtStart = false,
+    fun doorsInExistingGapsAndWindowsRoundTripWithoutExtraWalls() {
+        val door = PlanDoor(
+            hinge = PointMm(1_000.0, 0.0),
+            latch = PointMm(1_800.0, 0.0),
+            frameWidthMm = 50,
+            depthMm = 100,
             openAngleDegrees = 45.0,
-            swingTowardNearFace = true,
+            swingSign = -1,
             leafThicknessMm = 40
         )
         val window = WindowOpening(1_200, 1_000, OpeningAlignment.FAR_FACE, 60)
         val wall = WallSegment(
             PointMm(0.0, 0.0), PointMm(4_000.0, 0.0), 4_000, 0.0, 200,
-            WallGrowthSide.LEFT, listOf(door, window)
+            WallGrowthSide.LEFT, listOf(window)
         )
 
-        val dxf = DxfCodec.encode(listOf(wall))
+        val dxf = DxfCodec.encode(listOf(wall), doors = listOf(door))
         val imported = DxfCodec.decode(dxf)
 
         assertEquals(listOf(wall), imported.segments)
+        assertEquals(listOf(door), imported.doors)
         assertTrue(imported.warnings.isEmpty())
-        assertTrue(dxf.contains("\n1001\nDRAFTBEAM\n1000\nDBO3;DOOR;0;800;0;45;1;40"))
-        assertTrue(dxf.contains("\nFDXL_VISIBLE_0001\n"))
-        assertTrue(dxf.contains("\n62\n-5\n")) // full reconstruction axis is hidden in CAD
-        assertTrue(dxf.contains("\nFDXL_OPENINGS\n"))
-        assertEquals("800", entitiesOfType(dxf, "ARC").single()[40])
-        assertEquals(1, entitiesOfType(dxf, "LWPOLYLINE").count { polyline ->
-            polyline[8] == "FDXL_OPENINGS" && polyline[90] == "4"
-        }) // the open leaf; the frame is drawn with lines
-        // Two frame lines for the door plus the five closed-window lines.
-        assertEquals(7, entitiesOfType(dxf, "LINE").count { line -> line[8] == "FDXL_OPENINGS" })
-        assertThrows(IllegalArgumentException::class.java) {
-            DxfCodec.decode(dxf.replace("DBO3;DOOR;0;800", "DBO3;DOOR;0;999999"))
-        } // never silently replace a corrupted opening with solid wall
+        assertTrue(dxf.contains("\n1001\nDRAFTBEAM\n1000\nDBO4;DOOR;1000;0;1800;0;50;100;45;-1;40"))
+        assertTrue(dxf.contains("\nFDXL_DOORS\n"))
+        assertEquals(1, entitiesOfType(dxf, "ARC").count { arc -> arc[8] == "FDXL_DOORS" && arc[40] == "700" })
+        // Two frame blocks plus the open leaf.
+        assertEquals(3, entitiesOfType(dxf, "LWPOLYLINE").count { polyline ->
+            polyline[8] == "FDXL_DOORS" && polyline[90] == "4"
+        })
+        // A door whose metadata no longer fits its own gap is dropped with a notice.
+        val corrupted = DxfCodec.decode(
+            dxf.replace("DBO4;DOOR;1000;0;1800;0;50;100", "DBO4;DOOR;1000;0;1010;0;50;100")
+        )
+        assertTrue(corrupted.doors.isEmpty())
+        assertTrue(corrupted.warnings.any { it.contains("1 puertas") })
     }
 
     @Test
-    fun removedDoorFormatsAreDroppedAndReported() {
-        val door = DoorOpening(offsetMm = 0, holeLengthMm = 800, hingeAtStart = false)
+    fun doorsOfTheRemovedDesignsAreDroppedAndReported() {
         val window = WindowOpening(1_200, 1_000, OpeningAlignment.FAR_FACE, 60)
         val wall = WallSegment(
             PointMm(0.0, 0.0), PointMm(4_000.0, 0.0), 4_000, 0.0, 200,
-            WallGrowthSide.LEFT, listOf(door, window)
+            WallGrowthSide.LEFT, listOf(window)
         )
-        val dxf = DxfCodec.encode(listOf(wall))
+        val dxf = DxfCodec.encode(listOf(wall)).replace(
+            "DBO2;WINDOW;1200;1000;60;FAR_FACE",
+            "DBO2;WINDOW;1200;1000;60;FAR_FACE" + "\n1000\nDBO3;DOOR;0;800;0;90;0;40"
+        )
 
-        listOf(
-            "DBO3;DOOR;0;800;0;90;0;40" to "DBO2;DOOR;0;40;100;800;90;CENTER;0;1",
-            "DBO3;DOOR;0;800;0;90;0;40" to "DBO1;DOOR;0;880;CENTER;0;0;1;90"
-        ).forEach { (current, legacy) ->
-            val imported = DxfCodec.decode(dxf.replace(current, legacy))
-            assertEquals(listOf(window), imported.segments.single().openings)
-            assertTrue(imported.warnings.any { it.contains("1 puertas") })
-        }
+        val imported = DxfCodec.decode(dxf)
+
+        assertEquals(listOf(window), imported.segments.single().openings)
+        assertTrue(imported.doors.isEmpty())
+        assertTrue(imported.warnings.any { it.contains("1 puertas") })
     }
 
     @Test

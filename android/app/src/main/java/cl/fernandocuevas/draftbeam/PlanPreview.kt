@@ -73,16 +73,14 @@ fun PlanPreview(
     onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit,
     onEndpointMoveRequested: (Int, WallEndpoint, PointMm, PointMm) -> Unit,
     onConnectionRequested: (PointMm, PointMm, PointMm) -> Unit,
-    doorPlacementSpan: PlanGeometry.DoorSpan? = null,
-    doorPlacementWallIndex: Int? = null,
-    doorPlacementAnchor: PointMm? = null,
-    placingDoor: Boolean = false,
-    onDoorTapped: (wallIndex: Int?, world: PointMm) -> Unit = { _, _ -> },
-    onDoorAngleMoved: (world: PointMm) -> Unit = {},
-    onDoorAngleCommitted: () -> Unit = {},
-    openingPreview: Pair<Int, DoorOpening>? = null,
+    doors: List<PlanDoor> = emptyList(),
+    doorPlacement: DoorPlacementOverlay? = null,
+    onDoorTap: (world: PointMm, snappedVertex: PointMm?) -> Unit = { _, _ -> },
+    onDoorPointerMoved: (world: PointMm) -> Unit = {},
+    onDoorPointerCommitted: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val placingDoor = doorPlacement != null
     val draftSegment = remember { mutableStateOf<WallSegment?>(null) }
     val draftSnapPreview = remember { mutableStateOf<DraftSnapResult?>(null) }
     val endpointDragPreview = remember { mutableStateOf<EndpointDragPreview?>(null) }
@@ -96,7 +94,7 @@ fun PlanPreview(
         modifier = Modifier.matchParentSize()
             .background(canvasBackground)
             .onSizeChanged { viewport.updateCanvasSize(it, segments, notes) }
-            .pointerInput(segments, notes, selectedSegmentIndex, selectedNoteIndex, pendingNotePlacement, selectedStartPoint, snapOptions, viewport, placingDoor, doorPlacementSpan) {
+            .pointerInput(segments, notes, doors, selectedSegmentIndex, selectedNoteIndex, pendingNotePlacement, selectedStartPoint, snapOptions, viewport, placingDoor, doorPlacement) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = true)
                     val size = this.size
@@ -130,6 +128,7 @@ fun PlanPreview(
                     var previousPinchDistance = 0f
                     var pinchInitialized = false
                     var pressed = true
+                    var doorDragged = false
 
                     fun resolveDraftAt(position: Offset, source: PointMm): DraftSnapResult {
                         val pixelsPerMillimeter = viewport.pixelsPerMillimeter.coerceAtLeast(0.0001f)
@@ -188,8 +187,9 @@ fun PlanPreview(
 
                         when {
                             mode == GestureMode.PLACE_DOOR -> {
-                                if (doorPlacementSpan != null && movement > viewConfiguration.touchSlop) {
-                                    onDoorAngleMoved(viewport.unproject(currentPosition, size))
+                                if (movement > viewConfiguration.touchSlop) {
+                                    doorDragged = true
+                                    onDoorPointerMoved(viewport.unproject(currentPosition, size))
                                 }
                                 change.consume()
                             }
@@ -255,13 +255,15 @@ fun PlanPreview(
                             pressed = false
                             when (mode) {
                                 GestureMode.PLACE_DOOR -> {
-                                    if (doorPlacementSpan == null) {
-                                        val hit = findSegmentAt(
-                                            segments, down.position, size, viewport, 40.dp.toPx()
-                                        )
-                                        onDoorTapped(hit?.index, viewport.unproject(down.position, size))
+                                    if (doorDragged) {
+                                        onDoorPointerCommitted()
                                     } else {
-                                        onDoorAngleCommitted()
+                                        onDoorTap(
+                                            viewport.unproject(down.position, size),
+                                            findEndpointAt(
+                                                segments, down.position, size, viewport, 40.dp.toPx()
+                                            )
+                                        )
                                     }
                                 }
                                 GestureMode.TAP -> {
@@ -510,7 +512,6 @@ fun PlanPreview(
                             2.dp.toPx()
                         )
                     }
-                    is DoorOpening -> drawDoorPlan(segment, opening, viewport, size, DraftBeamColors.LaserCyan)
                 }
             }
             paint.color = lineColor.toArgb()
@@ -519,57 +520,22 @@ fun PlanPreview(
             drawSegmentLabel(nativeCanvas, paint, segment, start, end, segment.growthSide, dimensionLabelOffset)
         }
 
-        openingPreview?.let { (wallIndex, door) ->
-            renderSegments.getOrNull(wallIndex)?.let { wall ->
-                drawDoorPlan(
-                    wall, door, viewport, size, DraftBeamColors.LaserCyan,
-                    preview = true
-                )
-            }
-        }
+        doors.forEach { door -> drawDoorPlan(door, viewport, size, DraftBeamColors.LaserCyan) }
 
-        // ADT2 feedback: the chosen wall and its measured span stay visible, so a
-        // rejected tap is never silent. A wall without thickness is shown in amber.
-        if (placingDoor) {
-            doorPlacementWallIndex?.let { index ->
-                renderSegments.getOrNull(index)?.let { wall ->
-                    val color = if (wall.widthMm > 0L) {
-                        DraftBeamColors.LaserCyan
-                    } else {
-                        Color(0xFFE0AF68)
-                    }
-                    val shapes = wallShapes[index]
-                    if (shapes.isEmpty()) {
-                        drawLine(color, viewport.project(wall.start, size), viewport.project(wall.end, size), 3.dp.toPx())
-                    } else {
-                        shapes.forEach { polygon ->
-                            for (edge in polygon.indices) {
-                                drawLine(color, viewport.project(polygon[edge], size),
-                                    viewport.project(polygon[(edge + 1) % polygon.size], size), 2.dp.toPx())
-                            }
-                        }
-                    }
-                    doorPlacementSpan?.let { span ->
-                        val mid = wall.widthMm / 2.0
-                        drawLine(
-                            color = color,
-                            start = viewport.project(
-                                PlanGeometry.wallPoint(wall, span.offsetMm.toDouble(), mid), size
-                            ),
-                            end = viewport.project(
-                                PlanGeometry.wallPoint(wall, span.offsetMm + span.holeLengthMm.toDouble(), mid), size
-                            ),
-                            strokeWidth = 5.dp.toPx()
-                        )
-                    }
-                    doorPlacementAnchor?.let { anchor ->
-                        val along = PlanGeometry.alongMm(wall, anchor).coerceIn(0.0, wall.lengthMm.toDouble())
-                        val point = viewport.project(PlanGeometry.wallPoint(wall, along, wall.widthMm / 2.0), size)
-                        drawCircle(DraftBeamColors.BackgroundDeep, 9.dp.toPx(), point)
-                        drawCircle(color, 7.dp.toPx(), point)
-                        drawCircle(DraftBeamColors.BackgroundDeep, 3.dp.toPx(), point)
-                    }
-                }
+        doorPlacement?.let { overlay ->
+            overlay.preview?.let { door ->
+                drawDoorPlan(door, viewport, size, DraftBeamColors.LaserCyan, preview = true)
+            }
+            overlay.anchor?.let { anchor ->
+                val point = viewport.project(anchor, size)
+                drawCircle(DraftBeamColors.BackgroundDeep, 9.dp.toPx(), point)
+                drawCircle(DraftBeamColors.LaserCyan, 7.dp.toPx(), point)
+                drawCircle(DraftBeamColors.BackgroundDeep, 3.dp.toPx(), point)
+            }
+            overlay.depthMarks.forEach { mark ->
+                val point = viewport.project(mark, size)
+                drawCircle(DraftBeamColors.BackgroundDeep, 7.dp.toPx(), point)
+                drawCircle(Color(0xFFE0AF68), 5.dp.toPx(), point)
             }
         }
 
@@ -1030,13 +996,18 @@ class PlanViewportState {
         if (pixelsPerMillimeter <= 0f && canvasWidth > 0f && canvasHeight > 0f) fitToContent(segments, notes)
     }
 
-    fun fitToContent(segments: List<WallSegment>, notes: List<PlanNote> = emptyList()) {
+    fun fitToContent(
+        segments: List<WallSegment>,
+        notes: List<PlanNote> = emptyList(),
+        doors: List<PlanDoor> = emptyList()
+    ) {
         if (canvasWidth <= 0f || canvasHeight <= 0f) return
 
         val segmentPoints = segments.flatMap { segment ->
-            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment) +
-                segment.openings.filterIsInstance<DoorOpening>()
-                    .flatMap { OpeningGeometry.doorGeometry(segment, it).arc }
+            listOf(segment.start, segment.end) + PlanGeometry.wallCorners(segment)
+        } + doors.flatMap { door ->
+            val geometry = PlanDoors.geometry(door)
+            geometry.frames.flatten() + geometry.leaf + geometry.arc
         }
         val notePoints = notes.flatMap { note ->
             val width = note.textWidthMm
@@ -1250,14 +1221,13 @@ internal fun formatScaleCoordinate(coordinateMm: Double, divisionMm: Double): St
 }
 
 private fun DrawScope.drawDoorPlan(
-    wall: WallSegment,
-    door: DoorOpening,
+    door: PlanDoor,
     viewport: PlanViewportState,
     canvasSize: IntSize,
     color: Color,
     preview: Boolean = false
 ) {
-    val geometry = OpeningGeometry.doorGeometry(wall, door)
+    val geometry = PlanDoors.geometry(door)
     fun polygonPath(points: List<PointMm>): Path = Path().apply {
         if (points.isEmpty()) return@apply
         val first = viewport.project(points.first(), canvasSize)
@@ -1269,13 +1239,10 @@ private fun DrawScope.drawDoorPlan(
         close()
     }
 
-    geometry.frameLines.forEach { frame ->
-        drawLine(
-            color = color,
-            start = viewport.project(frame.start, canvasSize),
-            end = viewport.project(frame.end, canvasSize),
-            strokeWidth = 2.dp.toPx()
-        )
+    geometry.frames.forEach { frame ->
+        val path = polygonPath(frame)
+        drawPath(path, DraftBeamColors.PanelBackground)
+        drawPath(path, color, style = Stroke(2.dp.toPx()))
     }
     val leafPath = polygonPath(geometry.leaf)
     drawPath(leafPath, color.copy(alpha = if (preview) 0.16f else 0.26f))
@@ -1288,12 +1255,10 @@ private fun DrawScope.drawDoorPlan(
         }
         drawPath(arcPath, color.copy(alpha = 0.6f), style = Stroke(1.dp.toPx()))
     }
-    // The hinge always stays visible so the measured end is unambiguous.
-    val hinge = viewport.project(geometry.hinge, canvasSize)
-    drawCircle(DraftBeamColors.BackgroundDeep, 6.dp.toPx(), hinge)
-    drawCircle(color, 4.dp.toPx(), hinge)
+    val pivot = viewport.project(geometry.pivot, canvasSize)
+    drawCircle(DraftBeamColors.BackgroundDeep, 6.dp.toPx(), pivot)
+    drawCircle(color, 4.dp.toPx(), pivot)
 }
-
 
 private data class SegmentHit(val index: Int, val distancePx: Float, val lineLengthPx: Float)
 

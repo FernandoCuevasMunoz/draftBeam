@@ -60,38 +60,6 @@ sealed interface WallOpening {
     val holeLengthMm: Long
 }
 
-/**
- * ADT2 door (YQArch style): the wall opening is measured between two taps on the
- * wall mid-line and the leaf is exactly as long as that opening. The frame is
- * embedded between both wall faces, so it never shortens the leaf.
- *
- * [openAngleDegrees] is the angle between the closed leaf and the drawn one; the
- * leaf turns on the hinge at the start or the end of the opening and swings
- * toward the near or far wall face.
- */
-data class DoorOpening(
-    override val offsetMm: Long,
-    override val holeLengthMm: Long,
-    val hingeAtStart: Boolean = true,
-    val openAngleDegrees: Double = DEFAULT_OPEN_ANGLE_DEGREES,
-    val swingTowardNearFace: Boolean = false,
-    val leafThicknessMm: Long = DEFAULT_LEAF_THICKNESS_MM
-) : WallOpening {
-    init {
-        require(offsetMm >= 0L) { "La posición de la puerta no puede ser negativa." }
-        require(holeLengthMm > 0L) { "El ancho de la puerta debe ser mayor que cero." }
-        require(leafThicknessMm > 0L) { "El espesor de la hoja debe ser mayor que cero." }
-        require(openAngleDegrees.isFinite() && openAngleDegrees > 0.0 && openAngleDegrees <= 180.0) {
-            "El ángulo de apertura debe estar entre 0° y 180°."
-        }
-    }
-
-    companion object {
-        const val DEFAULT_LEAF_THICKNESS_MM = 40L
-        const val DEFAULT_OPEN_ANGLE_DEGREES = 90.0
-    }
-}
-
 /** Closed window symbol; still uses the previous geometry until its own redesign. */
 data class WindowOpening(
     override val offsetMm: Long,
@@ -149,15 +117,6 @@ data class DraftSnapResult(
 )
 
 object PlanGeometry {
-    /** Smallest opening the two-tap flow accepts. */
-    const val MIN_DOOR_HOLE_MM = 100L
-
-    /** Both taps are rounded to this grid so measured openings are round numbers. */
-    const val TAP_ROUNDING_MM = 10L
-
-    const val MIN_DOOR_ANGLE_DEGREES = 1.0
-    const val MAX_DOOR_ANGLE_DEGREES = 180.0
-
     private val origin = PointMm(0.0, 0.0)
 
     fun createWall(
@@ -464,109 +423,13 @@ object PlanGeometry {
                 "El vano debe caber dentro del muro."
             }
             require(opening.offsetMm >= previousEnd - 1e-6) { "Los vanos no pueden superponerse." }
-            when (opening) {
-                is WindowOpening -> require(opening.frameDepthMm <= segment.widthMm) {
+            if (opening is WindowOpening) {
+                require(opening.frameDepthMm <= segment.widthMm) {
                     "El ancho de la ventana debe caber entre las caras del muro."
-                }
-                is DoorOpening -> require(opening.leafThicknessMm <= segment.widthMm) {
-                    "El espesor de la hoja debe caber entre las caras del muro."
                 }
             }
             previousEnd = opening.offsetMm.toDouble() + hole
         }
-    }
-
-    /** Distance from the wall start to [point], measured along the wall axis. */
-    fun alongMm(segment: WallSegment, point: PointMm): Double {
-        val dx = segment.end.x - segment.start.x
-        val dy = segment.end.y - segment.start.y
-        val length = hypot(dx, dy)
-        require(length > 0.0) { "El muro no tiene longitud." }
-        return ((point.x - segment.start.x) * dx + (point.y - segment.start.y) * dy) / length
-    }
-
-    /** Signed distance from the wall axis to [point]; positive toward the grow side. */
-    fun acrossMm(segment: WallSegment, point: PointMm): Double {
-        val dx = segment.end.x - segment.start.x
-        val dy = segment.end.y - segment.start.y
-        val length = hypot(dx, dy)
-        require(length > 0.0) { "El muro no tiene longitud." }
-        val side = if (segment.growthSide == WallGrowthSide.LEFT) 1.0 else -1.0
-        return side * ((point.y - segment.start.y) * dx - (point.x - segment.start.x) * dy) / length
-    }
-
-    /** Opening measured by the two ADT2 taps, in wall-local coordinates. */
-    data class DoorSpan(val offsetMm: Long, val holeLengthMm: Long, val hingeAtStart: Boolean)
-
-    sealed interface DoorSpanResult {
-        data class Ready(val span: DoorSpan) : DoorSpanResult
-        data class Rejected(val message: String) : DoorSpanResult
-    }
-
-    /**
-     * ADT2 measurement: both taps are projected on the wall mid-line, rounded to
-     * [TAP_ROUNDING_MM] and ordered, and the distance between them becomes the
-     * opening and the leaf length. The hinge sits on the end touched first.
-     */
-    fun doorSpan(wall: WallSegment, firstTap: PointMm, secondTap: PointMm): DoorSpanResult {
-        if (wall.widthMm <= 0L) {
-            return DoorSpanResult.Rejected("Ese muro no tiene espesor. Edítalo y dale un ancho.")
-        }
-        val wallLength = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
-        fun roundedAlong(point: PointMm): Long = (alongMm(wall, point).coerceIn(0.0, wallLength) /
-            TAP_ROUNDING_MM).roundToLong() * TAP_ROUNDING_MM
-        val first = roundedAlong(firstTap)
-        val second = roundedAlong(secondTap)
-        val start = minOf(first, second)
-        val hole = maxOf(first, second) - start
-        if (hole < MIN_DOOR_HOLE_MM) {
-            return DoorSpanResult.Rejected("El vano debe medir al menos $MIN_DOOR_HOLE_MM mm.")
-        }
-        if (start <= 0L && start + hole >= wallLength.roundToLong()) {
-            return DoorSpanResult.Rejected(
-                "El vano no puede ocupar el muro completo: dejá muro en los dos extremos."
-            )
-        }
-        val span = DoorSpan(start, hole, first <= second)
-        val candidate = DoorOpening(offsetMm = span.offsetMm, holeLengthMm = span.holeLengthMm,
-            hingeAtStart = span.hingeAtStart)
-        return try {
-            validateOpenings(wall.copy(openings = wall.openings + candidate))
-            DoorSpanResult.Ready(span)
-        } catch (exception: IllegalArgumentException) {
-            DoorSpanResult.Rejected(exception.message ?: "El vano no cabe en el muro.")
-        }
-    }
-
-    /**
-     * Third ADT2 gesture: the pointer placed anywhere in the plan sets the side the
-     * leaf opens toward and the angle it turns on its hinge.
-     */
-    fun doorToward(wall: WallSegment, span: DoorSpan, pointer: PointMm): DoorOpening {
-        val holeEnd = span.offsetMm + span.holeLengthMm
-        val hingeAlong = if (span.hingeAtStart) span.offsetMm.toDouble() else holeEnd.toDouble()
-        val alongSign = if (span.hingeAtStart) 1.0 else -1.0
-        val dx = wall.end.x - wall.start.x
-        val dy = wall.end.y - wall.start.y
-        val length = hypot(dx, dy)
-        val side = if (wall.growthSide == WallGrowthSide.LEFT) 1.0 else -1.0
-        val alongX = dx / length * alongSign
-        val alongY = dy / length * alongSign
-        val acrossX = -dy / length * side
-        val acrossY = dx / length * side
-        val vx = pointer.x - wallPoint(wall, hingeAlong, wall.widthMm / 2.0).x
-        val vy = pointer.y - wallPoint(wall, hingeAlong, wall.widthMm / 2.0).y
-        val along = vx * alongX + vy * alongY
-        val across = vx * acrossX + vy * acrossY
-        val degrees = Math.toDegrees(atan2(abs(across), along))
-            .coerceIn(MIN_DOOR_ANGLE_DEGREES, MAX_DOOR_ANGLE_DEGREES)
-        return DoorOpening(
-            offsetMm = span.offsetMm,
-            holeLengthMm = span.holeLengthMm,
-            hingeAtStart = span.hingeAtStart,
-            openAngleDegrees = (degrees * 10.0).roundToLong() / 10.0,
-            swingTowardNearFace = across < 0.0
-        )
     }
 
     private fun shareEndpoint(first: WallSegment, second: WallSegment): Boolean =

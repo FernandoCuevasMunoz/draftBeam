@@ -136,6 +136,7 @@ import kotlin.math.roundToLong
 private data class PlanSnapshot(
     val segments: List<WallSegment>,
     val notes: List<PlanNote>,
+    val doors: List<PlanDoor>,
     val selectedStartPoint: PointMm?,
     val documentUri: Uri?,
     val restoresDocument: Boolean
@@ -184,6 +185,7 @@ class MainActivity : ComponentActivity() {
     private val notifications = mutableStateListOf<MeasurementNotification>()
     private val wallSegments = mutableStateListOf<WallSegment>()
     private val planNotes = mutableStateListOf<PlanNote>()
+    private val planDoors = mutableStateListOf<PlanDoor>()
     private val undoHistory = mutableStateListOf<PlanSnapshot>()
     private val latestMeasurementMm = mutableStateOf<Long?>(null)
     private val newLengthFieldFocused = mutableStateOf(false)
@@ -471,6 +473,7 @@ class MainActivity : ComponentActivity() {
                     notifications = notifications.toList(),
                     wallSegments = wallSegments.toList(),
                     notes = planNotes.toList(),
+                    doors = planDoors.toList(),
                     canUndo = undoHistory.isNotEmpty(),
                     latestMeasurementMm = latestMeasurementMm.value,
                     selectedAngleDegrees = selectedAngleDegrees.value,
@@ -554,6 +557,7 @@ class MainActivity : ComponentActivity() {
                         wallEditorOpen.value = false
                     },
                     onFingerDrawn = ::addWallFromFinger,
+                    onDoorCreated = { door -> addPlanDoor(door).also { status.value = it } },
                     onStartPointSelected = { point ->
                         selectedStartPoint.value = point
                         selectedWallIndex.value = null
@@ -822,12 +826,23 @@ class MainActivity : ComponentActivity() {
                 pushPlanSnapshot()
                 wallSegments[wallIndex] = updated
             }
-            when (opening) {
-                is DoorOpening -> "Puerta de ${opening.holeLengthMm} mm guardada."
-                is WindowOpening -> "Ventana guardada."
-            }
+            "Ventana guardada."
         } catch (exception: IllegalArgumentException) {
             exception.message ?: "No se pudo guardar el vano."
+        }
+    }
+
+    /** Adds a door measured in an existing gap; the plan keeps walls untouched. */
+    private fun addPlanDoor(door: PlanDoor): String {
+        return try {
+            pushPlanSnapshot()
+            planDoors.add(door)
+            selectedWallIndex.value = null
+            selectedNoteIndex.value = null
+            wallEditorOpen.value = false
+            "Puerta de ${door.leafLengthMm.roundToLong()} mm colocada en el vano."
+        } catch (exception: IllegalArgumentException) {
+            exception.message ?: "No se pudo colocar la puerta."
         }
     }
 
@@ -844,7 +859,8 @@ class MainActivity : ComponentActivity() {
         var writingStarted = false
         try {
             // Prepare the entire DXF before opening the destination with truncation.
-            val bytes = DxfCodec.encode(wallSegments.toList(), planNotes.toList()).toByteArray(Charsets.UTF_8)
+            val bytes = DxfCodec.encode(wallSegments.toList(), planNotes.toList(), planDoors.toList())
+                .toByteArray(Charsets.UTF_8)
             if (uri == currentDxfUri && !associateDocument) {
                 originalBytes = contentResolver.openInputStream(uri)?.use { input ->
                     val backup = java.io.ByteArrayOutputStream()
@@ -919,13 +935,18 @@ class MainActivity : ComponentActivity() {
             }
             val imported = DxfCodec.decode(contents)
             val before = wallSegments.toList()
-            if (before != imported.segments || planNotes.toList() != imported.notes || currentDxfUri != uri) {
+            val doorsBefore = planDoors.toList()
+            if (before != imported.segments || planNotes.toList() != imported.notes ||
+                doorsBefore != imported.doors || currentDxfUri != uri
+            ) {
                 pushPlanSnapshot(restoresDocument = true)
             }
             wallSegments.clear()
             wallSegments.addAll(imported.segments)
             planNotes.clear()
             planNotes.addAll(imported.notes)
+            planDoors.clear()
+            planDoors.addAll(imported.doors)
             selectedWallIndex.value = null
             selectedNoteIndex.value = null
             wallEditorOpen.value = false
@@ -1027,6 +1048,7 @@ class MainActivity : ComponentActivity() {
             })
             wallSegments.addAll(session.segments)
             planNotes.addAll(session.notes)
+            planDoors.addAll(session.doors)
             selectedStartPoint.value = session.selectedStartPoint
             currentDxfUri = session.documentUri?.let(Uri::parse)?.takeIf(::hasPersistedWritePermission)
             draftGate.restored()
@@ -1074,7 +1096,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentPlanSession(): PlanSession = PlanSession(
-        wallSegments.toList(), planNotes.toList(), selectedStartPoint.value, currentDxfUri?.toString()
+        wallSegments.toList(), planNotes.toList(), selectedStartPoint.value,
+        currentDxfUri?.toString(), planDoors.toList()
     )
 
     private fun writePlanSession(session: PlanSession) {
@@ -1100,6 +1123,7 @@ class MainActivity : ComponentActivity() {
         newPlanAfterSave = false
         wallSegments.clear()
         planNotes.clear()
+        planDoors.clear()
         undoHistory.clear()
         selectedWallIndex.value = null
         selectedNoteIndex.value = null
@@ -1196,6 +1220,7 @@ class MainActivity : ComponentActivity() {
             PlanSnapshot(
                 segments = wallSegments.toList(),
                 notes = planNotes.toList(),
+                doors = planDoors.toList(),
                 selectedStartPoint = selectedStartPoint.value,
                 documentUri = currentDxfUri,
                 restoresDocument = restoresDocument
@@ -1210,6 +1235,8 @@ class MainActivity : ComponentActivity() {
         wallSegments.addAll(previous.segments)
         planNotes.clear()
         planNotes.addAll(previous.notes)
+        planDoors.clear()
+        planDoors.addAll(previous.doors)
         selectedStartPoint.value = previous.selectedStartPoint
         if (previous.restoresDocument) associateDxfUri(previous.documentUri)
         draftGate.changed()
@@ -1249,6 +1276,7 @@ fun DraftBeamScreen(
     notifications: List<MeasurementNotification>,
     wallSegments: List<WallSegment>,
     notes: List<PlanNote>,
+    doors: List<PlanDoor>,
     canUndo: Boolean,
     latestMeasurementMm: Long?,
     selectedAngleDegrees: Double,
@@ -1292,7 +1320,8 @@ fun DraftBeamScreen(
     onNewLengthFieldFocusChanged: (Boolean) -> Unit,
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismissWallEditor: () -> Unit,
-    onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit
+    onFingerDrawn: (PointMm, PointMm, Boolean) -> Unit,
+    onDoorCreated: (PlanDoor) -> Unit
 ) {
     val viewport = remember { PlanViewportState() }
     var snapOptions by remember { mutableStateOf(DraftSnapOptions()) }
@@ -1309,13 +1338,10 @@ fun DraftBeamScreen(
     var pendingConnection by remember { mutableStateOf<PendingConnection?>(null) }
     var showNewWallSheet by remember { mutableStateOf(false) }
     var showCreateMenu by remember { mutableStateOf(false) }
-    // ADT2 door flow: tap the wall start, tap the opening end, then point at the opening side.
-    var doorPlacementActive by remember { mutableStateOf(false) }
-    var doorDraft by remember { mutableStateOf<DoorDraft?>(null) }
-    var doorPreview by remember { mutableStateOf<DoorOpening?>(null) }
-    var doorPlacementMessage by remember { mutableStateOf<String?>(null) }
-    var doorPlacementMessageIsError by remember { mutableStateOf(false) }
-    var doorEditTarget by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Door in an existing gap: two wall ends, two depth taps, then side and angle.
+    var doorFlow by remember { mutableStateOf<DoorFlow?>(null) }
+    var showDoorFrameWidthDialog by remember { mutableStateOf(false) }
+    var doorFrameWidthText by remember { mutableStateOf(PlanDoor.DEFAULT_FRAME_WIDTH_MM.toString()) }
     var focusWallWidth by remember { mutableStateOf(false) }
     var showNoteDialog by remember { mutableStateOf(false) }
     var noteEditIndex by remember { mutableStateOf<Int?>(null) }
@@ -1332,16 +1358,13 @@ fun DraftBeamScreen(
             pendingConnection = null
             showNewWallSheet = false
             showCreateMenu = false
-            doorPlacementActive = false
-            doorDraft = null
-            doorPreview = null
-            doorPlacementMessage = null
-            doorEditTarget = null
+            doorFlow = null
+            showDoorFrameWidthDialog = false
             focusWallWidth = false
             showNoteDialog = false
             noteEditIndex = null
             noteTextDraft = ""
-            viewport.fitToContent(wallSegments, notes)
+            viewport.fitToContent(wallSegments, notes, doors)
         }
     }
 
@@ -1389,82 +1412,150 @@ fun DraftBeamScreen(
     }
 
     val cancelDoorFlow: () -> Unit = {
-        doorPlacementActive = false
-        doorDraft = null
-        doorPreview = null
-        doorPlacementMessage = null
-        doorPlacementMessageIsError = false
-        doorEditTarget = null
+        doorFlow = null
+        showDoorFrameWidthDialog = false
     }
 
-    val startDoorPlacement: () -> Unit = {
+    /** New -> Puerta asks only for the frame width before measuring the gap. */
+    val requestDoorFlow: () -> Unit = {
         cancelDoorFlow()
-        doorPlacementActive = true
-        doorPlacementMessage = "Tocá el muro donde empieza el vano de la puerta."
+        doorFrameWidthText = PlanDoor.DEFAULT_FRAME_WIDTH_MM.toString()
+        showDoorFrameWidthDialog = true
     }
 
-    /** ADT2 first and second taps: anchor the opening on a wall, then measure it. */
-    val handleDoorTapped: (Int?, PointMm) -> Unit = { wallIndex, world ->
-        val wall = wallIndex?.let(wallSegments::getOrNull)
-        if (wall == null) {
-            doorPlacementMessage = "Ningún muro en ese punto. Tocá sobre la línea o el ancho de un muro."
-            doorPlacementMessageIsError = true
-        } else if (wall.widthMm <= 0L) {
-            doorDraft = DoorDraft(wallIndex!!, world)
-            doorPreview = null
-            doorPlacementMessage = "Muro tomado, pero no tiene espesor. Editalo y dale un ancho."
-            doorPlacementMessageIsError = true
-        } else {
-            val draft = doorDraft
-            if (draft == null || draft.wallIndex != wallIndex) {
-                doorDraft = DoorDraft(wallIndex, world)
-                doorPreview = null
-                doorPlacementMessage =
-                    "Muro tomado en el primer punto. Tocá el otro extremo del vano sobre ese mismo muro."
-                doorPlacementMessageIsError = false
-            } else {
-                when (val measured = PlanGeometry.doorSpan(wall, draft.firstTap, world)) {
-                    is PlanGeometry.DoorSpanResult.Ready -> {
-                        doorDraft = draft.copy(span = measured.span)
-                        doorPreview = DoorOpening(
-                            offsetMm = measured.span.offsetMm,
-                            holeLengthMm = measured.span.holeLengthMm,
-                            hingeAtStart = measured.span.hingeAtStart
+    val beginDoorFlow: (Long) -> Unit = { frameWidthMm ->
+        showDoorFrameWidthDialog = false
+        doorFlow = DoorFlow(
+            phase = DoorPhase.GAP_FIRST,
+            frameWidthMm = frameWidthMm,
+            message = "Tocá el extremo del primer muro: ahí empieza el vano."
+        )
+    }
+
+    /** Proposed frame depth: the width of the walls that hold the gap, when they agree. */
+    val proposedDepth: (PointMm, PointMm) -> Long = { hinge, latch ->
+        val left = PlanDoors.wallWidthAt(wallSegments, hinge)
+        val right = PlanDoors.wallWidthAt(wallSegments, latch)
+        when {
+            left != null && right != null -> if (left == right) left else minOf(left, right)
+            left != null -> left
+            right != null -> right
+            else -> PlanDoor.DEFAULT_DEPTH_MM
+        }
+    }
+
+    val commitDoor: (PlanDoor?) -> Unit = { door ->
+        if (door != null) onDoorCreated(door)
+        doorFlow = null
+    }
+
+    val acceptProposedDepth: () -> Unit = {
+        val flow = doorFlow
+        val door = flow?.door
+        if (flow != null && door != null) {
+            doorFlow = flow.copy(
+                phase = DoorPhase.SWING,
+                depthMarks = emptyList(),
+                message = "Profundidad de ${door.depthMm} mm. Movés el dedo para elegir el lado y el " +
+                    "ángulo de apertura; tocá para confirmar."
+            )
+        }
+    }
+
+    /** Gap taps snap to wall ends, depth taps measure across, and the last tap confirms. */
+    val handleDoorTapped: (PointMm, PointMm?) -> Unit = { world, vertex ->
+        val flow = doorFlow
+        if (flow != null) {
+            when (flow.phase) {
+                DoorPhase.GAP_FIRST -> {
+                    doorFlow = if (vertex == null) {
+                        flow.copy(
+                            message = "Tocá el extremo de un muro: ahí empieza el vano.",
+                            messageIsError = true
                         )
-                        doorPlacementMessage =
-                            "Vano de ${measured.span.holeLengthMm} mm. Movés el dedo para elegir el lado y el ángulo; tocá para confirmar."
-                        doorPlacementMessageIsError = false
-                    }
-                    is PlanGeometry.DoorSpanResult.Rejected -> {
-                        doorPlacementMessage = measured.message
-                        doorPlacementMessageIsError = true
+                    } else {
+                        flow.copy(
+                            phase = DoorPhase.GAP_SECOND,
+                            hinge = vertex,
+                            message = "Primer extremo tomado. Tocá el extremo del otro muro.",
+                            messageIsError = false
+                        )
                     }
                 }
+                DoorPhase.GAP_SECOND -> {
+                    val hinge = flow.hinge
+                    if (vertex == null || hinge == null || vertex == hinge) {
+                        doorFlow = flow.copy(
+                            message = "Tocá el extremo del otro muro, no el mismo.",
+                            messageIsError = true
+                        )
+                    } else {
+                        val depth = proposedDepth(hinge, vertex)
+                        when (val gap = PlanDoors.fromGap(hinge, vertex, flow.frameWidthMm, depth)) {
+                            is DoorGapResult.Ready -> doorFlow = flow.copy(
+                                phase = DoorPhase.DEPTH,
+                                door = gap.door,
+                                proposedDepthMm = depth,
+                                message = "Vano de ${gap.door.gapLengthMm.roundToLong()} mm, hoja de " +
+                                    "${gap.door.leafLengthMm.roundToLong()} mm. Tocá dos puntos a los lados " +
+                                    "del muro para medir la profundidad, o usá los $depth mm propuestos.",
+                                messageIsError = false
+                            )
+                            is DoorGapResult.Rejected -> doorFlow = flow.copy(
+                                message = gap.message,
+                                messageIsError = true
+                            )
+                        }
+                    }
+                }
+                DoorPhase.DEPTH -> {
+                    val door = flow.door
+                    if (door == null) {
+                        doorFlow = null
+                    } else if (flow.depthMarks.isEmpty()) {
+                        doorFlow = flow.copy(
+                            depthMarks = listOf(world),
+                            message = "Ahora tocá el lado opuesto del muro.",
+                            messageIsError = false
+                        )
+                    } else {
+                        val depth = PlanDoors.depthFromTaps(door, flow.depthMarks.first(), world)
+                        if (depth == null) {
+                            doorFlow = flow.copy(
+                                depthMarks = emptyList(),
+                                message = "La profundidad debe medir al menos ${PlanDoor.MIN_DEPTH_MM} mm. " +
+                                    "Tocá otra vez los dos lados del muro.",
+                                messageIsError = true
+                            )
+                        } else {
+                            when (val rebuilt = PlanDoors.fromGap(door.hinge, door.latch, door.frameWidthMm, depth)) {
+                                is DoorGapResult.Ready -> doorFlow = flow.copy(
+                                    phase = DoorPhase.SWING,
+                                    depthMarks = emptyList(),
+                                    door = rebuilt.door,
+                                    message = "Profundidad de $depth mm. Movés el dedo para elegir el lado y " +
+                                        "el ángulo de apertura; tocá para confirmar.",
+                                    messageIsError = false
+                                )
+                                is DoorGapResult.Rejected -> doorFlow = flow.copy(
+                                    message = rebuilt.message,
+                                    messageIsError = true
+                                )
+                            }
+                        }
+                    }
+                }
+                DoorPhase.SWING -> commitDoor(flow.door?.let { PlanDoors.toward(it, world) })
             }
         }
     }
 
-    /** Third ADT2 gesture: the pointer sets the opening side and the leaf angle. */
-    val handleDoorAngleMoved: (PointMm) -> Unit = { world ->
-        val draft = doorDraft
-        val span = draft?.span
-        val wall = draft?.wallIndex?.let(wallSegments::getOrNull)
-        if (draft != null && span != null && wall != null) {
-            doorPreview = PlanGeometry.doorToward(wall, span, world)
-        }
-    }
-
-    val saveDoorDraft: () -> Unit = {
-        val draft = doorDraft
-        val opening = doorPreview
-        if (draft != null && opening != null) {
-            val result = onSaveOpening(draft.wallIndex, null, opening)
-            if (result.startsWith("Puerta")) {
-                cancelDoorFlow()
-            } else {
-                doorPlacementMessage = result
-                doorPlacementMessageIsError = true
-            }
+    /** The pointer that follows the leaf sets the opening side and angle. */
+    val handleDoorPointerMoved: (PointMm) -> Unit = { world ->
+        val flow = doorFlow
+        val door = flow?.door
+        if (flow != null && door != null && flow.phase == DoorPhase.SWING) {
+            doorFlow = flow.copy(door = PlanDoors.toward(door, world))
         }
     }
 
@@ -1648,18 +1739,17 @@ fun DraftBeamScreen(
                     onConnectionRequested = { start, freeEnd, target ->
                         pendingConnection = PendingConnection(start, freeEnd, target)
                     },
-                    doorPlacementSpan = doorDraft?.span,
-                    doorPlacementWallIndex = doorDraft?.wallIndex,
-                    doorPlacementAnchor = doorDraft?.firstTap,
-                    placingDoor = doorPlacementActive,
-                    onDoorTapped = handleDoorTapped,
-                    onDoorAngleMoved = handleDoorAngleMoved,
-                    onDoorAngleCommitted = saveDoorDraft,
-                    openingPreview = if (doorPlacementActive) {
-                        doorDraft?.wallIndex?.let { index -> doorPreview?.let { index to it } }
-                    } else {
-                        null
+                    doors = doors,
+                    doorPlacement = doorFlow?.let { flow ->
+                        DoorPlacementOverlay(
+                            anchor = flow.hinge,
+                            depthMarks = flow.depthMarks,
+                            preview = flow.door
+                        )
                     },
+                    onDoorTap = handleDoorTapped,
+                    onDoorPointerMoved = handleDoorPointerMoved,
+                    onDoorPointerCommitted = { commitDoor(doorFlow?.door) },
                     modifier = Modifier.fillMaxSize()
                 )
                 pendingNoteText?.let {
@@ -1677,7 +1767,7 @@ fun DraftBeamScreen(
                         }
                     }
                 }
-                if (doorPlacementActive) {
+                doorFlow?.let { flow ->
                     Surface(
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 42.dp),
                         color = DraftBeamColors.PanelBackground.copy(alpha = 0.96f),
@@ -1688,9 +1778,8 @@ fun DraftBeamScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = doorPlacementMessage
-                                    ?: "Tocá el muro donde empieza el vano de la puerta.",
-                                color = if (doorPlacementMessageIsError) {
+                                text = flow.message ?: "Tocá el extremo de un muro.",
+                                color = if (flow.messageIsError) {
                                     MaterialTheme.colorScheme.error
                                 } else {
                                     MaterialTheme.colorScheme.onSurface
@@ -1698,6 +1787,11 @@ fun DraftBeamScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
+                            if (flow.phase == DoorPhase.DEPTH) {
+                                TextButton(onClick = acceptProposedDepth) {
+                                    Text("Usar ${flow.proposedDepthMm} mm")
+                                }
+                            }
                             TextButton(onClick = cancelDoorFlow) { Text("Cancelar") }
                         }
                     }
@@ -1807,7 +1901,7 @@ fun DraftBeamScreen(
                 },
                 onNewDoor = {
                     showCreateMenu = false
-                    startDoorPlacement()
+                    requestDoorFlow()
                 },
                 onEdit = editSelectedObject,
                 onDelete = onDeleteWallClick,
@@ -2002,18 +2096,17 @@ fun DraftBeamScreen(
                             onConnectionRequested = { start, freeEnd, target ->
                                 pendingConnection = PendingConnection(start, freeEnd, target)
                             },
-                            doorPlacementSpan = doorDraft?.span,
-                            doorPlacementWallIndex = doorDraft?.wallIndex,
-                            doorPlacementAnchor = doorDraft?.firstTap,
-                            placingDoor = doorPlacementActive,
-                            onDoorTapped = handleDoorTapped,
-                            onDoorAngleMoved = handleDoorAngleMoved,
-                            onDoorAngleCommitted = saveDoorDraft,
-                            openingPreview = if (doorPlacementActive) {
-                                doorDraft?.wallIndex?.let { index -> doorPreview?.let { index to it } }
-                            } else {
-                                null
+                            doors = doors,
+                            doorPlacement = doorFlow?.let { flow ->
+                                DoorPlacementOverlay(
+                                    anchor = flow.hinge,
+                                    depthMarks = flow.depthMarks,
+                                    preview = flow.door
+                                )
                             },
+                            onDoorTap = handleDoorTapped,
+                            onDoorPointerMoved = handleDoorPointerMoved,
+                            onDoorPointerCommitted = { commitDoor(doorFlow?.door) },
                             modifier = Modifier.fillMaxSize()
                         )
                         SnapToolsOverlay(
@@ -2039,7 +2132,7 @@ fun DraftBeamScreen(
                         onNewDoor = {
                             showCreateMenu = false
                             showFullscreenPlan = false
-                            startDoorPlacement()
+                            requestDoorFlow()
                         },
                         onEdit = editSelectedObject,
                         onDelete = onDeleteWallClick,
@@ -2132,36 +2225,18 @@ fun DraftBeamScreen(
                 if (result.startsWith("Muro actualizado")) onDismissWallEditor()
                 result
             },
-            onEditDoor = { openingIndex ->
-                onDismissWallEditor()
-                doorEditTarget = selectedWallIndex to openingIndex
-            },
             onDeleteOpening = { openingIndex -> onDeleteOpening(selectedWallIndex, openingIndex) },
             onDelete = onDeleteWallClick
         )
     }
 
-    doorEditTarget?.let { (wallIndex, openingIndex) ->
-        val wall = wallSegments.getOrNull(wallIndex)
-        val door = wall?.openings?.getOrNull(openingIndex) as? DoorOpening
-        if (wall == null || door == null) {
-            doorEditTarget = null
-        } else {
-            DoorEditSheet(
-                wall = wall,
-                door = door,
-                onDismiss = { doorEditTarget = null },
-                onSave = { updated ->
-                    val result = onSaveOpening(wallIndex, openingIndex, updated)
-                    if (result.startsWith("Puerta")) {
-                        doorEditTarget = null
-                        null
-                    } else {
-                        result
-                    }
-                }
-            )
-        }
+    if (showDoorFrameWidthDialog) {
+        DoorFrameWidthDialog(
+            frameWidthText = doorFrameWidthText,
+            onFrameWidthChange = { doorFrameWidthText = it },
+            onDismiss = cancelDoorFlow,
+            onAccept = beginDoorFlow
+        )
     }
 
     if (showNewWallSheet) {
@@ -2356,7 +2431,6 @@ private fun WallEditorSheet(
     onLengthMeasurementConsumed: (Int) -> Unit,
     onDismiss: () -> Unit,
     onSaveWall: (Long, Long, WallGrowthSide) -> String,
-    onEditDoor: (Int) -> Unit,
     onDeleteOpening: (Int) -> Unit,
     onDelete: () -> Unit
 ) {
@@ -2458,10 +2532,10 @@ private fun WallEditorSheet(
                 }
             }
 
-            Text("Puertas y ventanas", style = MaterialTheme.typography.titleMedium)
+            Text("Ventanas", style = MaterialTheme.typography.titleMedium)
             if (segment.openings.isEmpty()) {
                 Text(
-                    "Sin vanos. Crea una puerta desde Nuevo → Puerta.",
+                    "Sin ventanas en este muro. Las puertas van en un vano entre dos muros: Nuevo → Puerta.",
                     style = MaterialTheme.typography.bodySmall,
                     color = DraftBeamColors.TextSecondary
                 )
@@ -2469,17 +2543,10 @@ private fun WallEditorSheet(
             segment.openings.forEachIndexed { openingIndex, opening ->
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = when (opening) {
-                            is DoorOpening ->
-                                "Puerta ${opening.holeLengthMm} mm · ángulo ${opening.openAngleDegrees.roundToLong()}° · hoja ${opening.leafThicknessMm} mm"
-                            is WindowOpening -> "Ventana ${opening.holeLengthMm} mm (edición pendiente)"
-                        },
+                        text = "Ventana ${opening.holeLengthMm} mm (edición pendiente)",
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.bodySmall
                     )
-                    if (opening is DoorOpening) {
-                        TextButton(onClick = { onEditDoor(openingIndex) }) { Text("Editar") }
-                    }
                     TextButton(onClick = { onDeleteOpening(openingIndex) }) { Text("Quitar") }
                 }
             }
@@ -2537,199 +2604,6 @@ private fun WallEditorSheet(
  * ADT2 door draft: the first tap anchors the opening on a wall, the second one
  * measures it, and the following gesture sets the opening side and the angle.
  */
-private data class DoorDraft(
-    val wallIndex: Int,
-    val firstTap: PointMm,
-    val span: PlanGeometry.DoorSpan? = null
-)
-
-@Composable
-private fun DoorChoiceButton(
-    label: String,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Button(
-        onClick = onClick,
-        modifier = modifier.heightIn(min = 44.dp),
-        shape = RoundedCornerShape(12.dp),
-        border = if (selected) null else BorderStroke(1.dp, DraftBeamColors.Border),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (selected) DraftBeamColors.Primary else DraftBeamColors.SurfaceElevated,
-            contentColor = DraftBeamColors.TextPrimary
-        ),
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 6.dp)
-    ) {
-        Text(label, maxLines = 2, style = MaterialTheme.typography.labelSmall)
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun DoorEditSheet(
-    wall: WallSegment,
-    door: DoorOpening,
-    onDismiss: () -> Unit,
-    onSave: (DoorOpening) -> String?
-) {
-    val wallLength = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
-    val maxStartOffset = (wallLength - door.holeLengthMm).coerceAtLeast(0.0).roundToLong()
-    var distanceText by remember { mutableStateOf(door.offsetMm.toString()) }
-    var angleText by remember { mutableStateOf(door.openAngleDegrees.roundToLong().toString()) }
-    var thicknessText by remember { mutableStateOf(door.leafThicknessMm.toString()) }
-    var hingeAtStart by remember { mutableStateOf(door.hingeAtStart) }
-    var swingTowardNearFace by remember { mutableStateOf(door.swingTowardNearFace) }
-    var error by remember { mutableStateOf<String?>(null) }
-    // The wall grows from its reference face toward growthSide; the near face is the opposite one.
-    val nearLabel = (if (wall.growthSide == WallGrowthSide.LEFT) {
-        WallGrowthSide.RIGHT
-    } else {
-        WallGrowthSide.LEFT
-    }).axisLabel(wall.angleDegrees)
-    val farLabel = wall.growthSide.axisLabel(wall.angleDegrees)
-
-    fun candidate(): DoorOpening? {
-        val distance = distanceText.toLongOrNull()?.takeIf { it in 0L..maxStartOffset } ?: return null
-        val thickness = thicknessText.toLongOrNull()?.takeIf { it > 0L } ?: return null
-        val angle = angleText.toDoubleOrNull()?.takeIf { it in 1.0..180.0 } ?: return null
-        return door.copy(
-            offsetMm = distance,
-            openAngleDegrees = angle,
-            leafThicknessMm = thickness,
-            hingeAtStart = hingeAtStart,
-            swingTowardNearFace = swingTowardNearFace
-        )
-    }
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = DraftBeamColors.Surface,
-        contentColor = DraftBeamColors.TextPrimary,
-        dragHandle = { BottomSheetDefaults.DragHandle(color = DraftBeamColors.TextMuted) }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 560.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(
-                "Editar puerta",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                "Muro ${wallLength.roundToLong()} × ${wall.widthMm} mm · vano ${door.holeLengthMm} mm",
-                style = MaterialTheme.typography.bodySmall,
-                color = DraftBeamColors.TextSecondary
-            )
-
-            OutlinedTextField(
-                value = distanceText,
-                onValueChange = { input ->
-                    distanceText = input.filter(Char::isDigit)
-                    error = null
-                },
-                label = { Text("Distancia desde el inicio del muro (mm)") },
-                supportingText = { Text("Máximo: $maxStartOffset mm") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Text("Bisagra", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DoorChoiceButton(
-                    label = "Inicio",
-                    selected = hingeAtStart,
-                    modifier = Modifier.weight(1f),
-                    onClick = { hingeAtStart = true }
-                )
-                DoorChoiceButton(
-                    label = "Final",
-                    selected = !hingeAtStart,
-                    modifier = Modifier.weight(1f),
-                    onClick = { hingeAtStart = false }
-                )
-            }
-
-            Text("Abre hacia", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DoorChoiceButton(
-                    label = nearLabel,
-                    selected = swingTowardNearFace,
-                    modifier = Modifier.weight(1f),
-                    onClick = { swingTowardNearFace = true }
-                )
-                DoorChoiceButton(
-                    label = farLabel,
-                    selected = !swingTowardNearFace,
-                    modifier = Modifier.weight(1f),
-                    onClick = { swingTowardNearFace = false }
-                )
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = angleText,
-                    onValueChange = { input ->
-                        angleText = input.filter { it.isDigit() || it == '.' }
-                        error = null
-                    },
-                    label = { Text("Ángulo de apertura (°)") },
-                    supportingText = { Text("Entre 1° y 180°") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-                OutlinedTextField(
-                    value = thicknessText,
-                    onValueChange = { input ->
-                        thicknessText = input.filter(Char::isDigit)
-                        error = null
-                    },
-                    label = { Text("Espesor de hoja (mm)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, DraftBeamColors.Border)
-                ) { Text("Cancelar", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
-                Button(
-                    onClick = {
-                        val updated = candidate()
-                        if (updated == null) {
-                            error = "Revisá la distancia, el ángulo y el espesor de la hoja."
-                        } else {
-                            error = onSave(updated)
-                        }
-                    },
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DraftBeamColors.Primary,
-                        contentColor = DraftBeamColors.TextPrimary
-                    )
-                ) { Text("Guardar", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
-            }
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewWallSheet(

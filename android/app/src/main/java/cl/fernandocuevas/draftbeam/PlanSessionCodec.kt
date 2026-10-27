@@ -11,11 +11,12 @@ data class PlanSession(
     val notes: List<PlanNote>,
     val selectedStartPoint: PointMm?,
     val documentUri: String?,
+    val doors: List<PlanDoor> = emptyList(),
     val warnings: List<String> = emptyList()
 )
 
 object PlanSessionCodec {
-    private const val VERSION = 4
+    private const val VERSION = 5
     private const val MAX_ITEMS = 100_000
     private const val TYPE_DOOR = 1
     private const val TYPE_WINDOW = 2
@@ -42,15 +43,6 @@ object PlanSessionCodec {
                 output.writeInt(segment.openings.size)
                 segment.openings.forEach { opening ->
                     when (opening) {
-                        is DoorOpening -> {
-                            output.writeInt(TYPE_DOOR)
-                            output.writeLong(opening.offsetMm)
-                            output.writeLong(opening.holeLengthMm)
-                            output.writeBoolean(opening.hingeAtStart)
-                            output.writeDouble(opening.openAngleDegrees)
-                            output.writeBoolean(opening.swingTowardNearFace)
-                            output.writeLong(opening.leafThicknessMm)
-                        }
                         is WindowOpening -> {
                             output.writeInt(TYPE_WINDOW)
                             output.writeLong(opening.offsetMm)
@@ -60,6 +52,16 @@ object PlanSessionCodec {
                         }
                     }
                 }
+            }
+            output.writeInt(session.doors.size)
+            session.doors.forEach { door ->
+                output.writePoint(door.hinge)
+                output.writePoint(door.latch)
+                output.writeLong(door.frameWidthMm)
+                output.writeLong(door.depthMm)
+                output.writeDouble(door.openAngleDegrees)
+                output.writeInt(door.swingSign)
+                output.writeLong(door.leafThicknessMm)
             }
             output.writeInt(session.notes.size)
             session.notes.forEach { note ->
@@ -95,6 +97,26 @@ object PlanSessionCodec {
                 widthMm = width, growthSide = side, openings = openings
             ).also(PlanGeometry::validateOpenings)
         }
+        val doors = if (version >= 5) {
+            List(input.readCount()) {
+                try {
+                    PlanDoor(
+                        hinge = input.readPoint(),
+                        latch = input.readPoint(),
+                        frameWidthMm = input.readLong(),
+                        depthMm = input.readLong(),
+                        openAngleDegrees = input.readDouble(),
+                        swingSign = input.readInt(),
+                        leafThicknessMm = input.readLong()
+                    )
+                } catch (_: IllegalArgumentException) {
+                    droppedDoors++
+                    null
+                }
+            }.filterNotNull()
+        } else {
+            emptyList()
+        }
         val notes = List(input.readCount()) {
             PlanNote(input.readUTF(), input.readPoint(), input.readDouble(), input.readDouble())
         }
@@ -104,7 +126,7 @@ object PlanSessionCodec {
         } else {
             emptyList()
         }
-        PlanSession(segments, notes, selected, uri, warnings)
+        PlanSession(segments, notes, selected, uri, doors, warnings)
     }
 
     private fun readOpenings(input: DataInputStream, version: Int): List<WallOpening?> =
@@ -114,6 +136,7 @@ object PlanSessionCodec {
             when (version) {
                 2 -> readLegacyOpening(input)
                 3 -> readVersion3Opening(input)
+                4 -> readVersion4Opening(input)
                 else -> readOpening(input)
             }
         }
@@ -160,15 +183,29 @@ object PlanSessionCodec {
         }
     }
 
+    /** Reads a version-4 opening; its attached doors are no longer compatible. */
+    private fun readVersion4Opening(input: DataInputStream): WallOpening? {
+        val type = input.readInt()
+        require(type == TYPE_DOOR || type == TYPE_WINDOW) { "Tipo de vano inválido." }
+        return if (type == TYPE_DOOR) {
+            input.readLong() // offset
+            input.readLong() // opening length
+            input.readBoolean() // hingeAtStart
+            input.readDouble() // openAngleDegrees
+            input.readBoolean() // swingTowardNearFace
+            input.readLong() // leafThickness
+            null
+        } else {
+            WindowOpening(
+                offsetMm = input.readLong(),
+                holeLengthMm = input.readLong(),
+                alignment = OpeningAlignment.entries[input.readOpeningAlignment()],
+                frameDepthMm = input.readLong()
+            )
+        }
+    }
+
     private fun readOpening(input: DataInputStream): WallOpening = when (val type = input.readInt()) {
-        TYPE_DOOR -> DoorOpening(
-            offsetMm = input.readLong(),
-            holeLengthMm = input.readLong(),
-            hingeAtStart = input.readBoolean(),
-            openAngleDegrees = input.readDouble(),
-            swingTowardNearFace = input.readBoolean(),
-            leafThicknessMm = input.readLong()
-        )
         TYPE_WINDOW -> WindowOpening(
             offsetMm = input.readLong(),
             holeLengthMm = input.readLong(),
