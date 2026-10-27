@@ -1,6 +1,8 @@
 package cl.fernandocuevas.draftbeam
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +30,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.layout.height
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -92,6 +99,65 @@ internal fun DoorFrameWidthDialog(
     )
 }
 
+/** Live sketch of the door, so mirror and angle changes are visible before saving. */
+@Composable
+fun DoorSketch(door: PlanDoor, modifier: Modifier = Modifier) {
+    Canvas(
+        modifier = modifier.background(DraftBeamColors.BackgroundDeep, RoundedCornerShape(12.dp))
+    ) {
+        val geometry = PlanDoors.geometry(door)
+        val points = geometry.frames.flatten() + geometry.leaf + geometry.arc +
+            listOf(door.hinge, door.latch)
+        val minX = points.minOf { it.x }
+        val maxX = points.maxOf { it.x }
+        val minY = points.minOf { it.y }
+        val maxY = points.maxOf { it.y }
+        val spanX = (maxX - minX).coerceAtLeast(1.0)
+        val spanY = (maxY - minY).coerceAtLeast(1.0)
+        val scale = minOf(size.width / spanX.toFloat(), size.height / spanY.toFloat()) * 0.82f
+        val originX = (size.width - spanX.toFloat() * scale) / 2f
+        val originY = (size.height - spanY.toFloat() * scale) / 2f
+
+        fun screen(point: PointMm): Offset = Offset(
+            originX + ((point.x - minX) * scale).toFloat(),
+            originY + ((maxY - point.y) * scale).toFloat()
+        )
+        fun path(points: List<PointMm>, closed: Boolean): Path = Path().apply {
+            if (points.isEmpty()) return@apply
+            val first = screen(points.first())
+            moveTo(first.x, first.y)
+            points.drop(1).forEach { lineTo(screen(it).x, screen(it).y) }
+            if (closed) close()
+        }
+
+        drawLine(
+            color = DraftBeamColors.TextMuted,
+            start = screen(door.hinge),
+            end = screen(door.latch),
+            strokeWidth = 1.dp.toPx()
+        )
+        geometry.frames.forEach { frame ->
+            drawPath(path(frame, closed = true), DraftBeamColors.SurfaceElevated)
+            drawPath(path(frame, closed = true), DraftBeamColors.LaserCyan, style = Stroke(2.dp.toPx()))
+        }
+        drawPath(path(geometry.leaf, closed = true), DraftBeamColors.LaserCyan.copy(alpha = 0.25f))
+        drawPath(path(geometry.leaf, closed = true), DraftBeamColors.LaserCyan, style = Stroke(2.dp.toPx()))
+        drawPath(
+            path(geometry.arc, closed = false),
+            DraftBeamColors.LaserCyan.copy(alpha = 0.7f),
+            style = Stroke(
+                1.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx()))
+            )
+        )
+        drawCircle(DraftBeamColors.LaserCyan, 4.dp.toPx(), screen(geometry.pivot))
+        // Reference marks for the wall ends the door was measured on.
+        listOf(door.hinge, door.latch).forEach { point ->
+            drawCircle(DraftBeamColors.TextSecondary, 3.dp.toPx(), screen(point))
+        }
+    }
+}
+
 /** Values a placed door still allows editing: angle, hinge mirror, frame and leaf thickness. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -133,6 +199,8 @@ fun DoorEditSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = DraftBeamColors.TextSecondary
             )
+
+            DoorSketch(draft, Modifier.fillMaxWidth().height(170.dp))
 
             Text("Ángulo de la hoja", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
