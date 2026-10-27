@@ -1,5 +1,6 @@
 package cl.fernandocuevas.draftbeam
 
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -51,20 +52,27 @@ data class WallSegment(
     val openings: List<WallOpening> = emptyList()
 )
 
-enum class OpeningKind { DOOR, WINDOW }
 enum class OpeningAlignment { CENTER, NEAR_FACE, FAR_FACE }
 
 /** Distances are local to the wall's start and near face, independent of its world angle. */
-data class WallOpening(
-    val kind: OpeningKind,
-    val offsetMm: Long,
-    val lengthMm: Long,
+sealed interface WallOpening {
+    val offsetMm: Long
+    val holeLengthMm: Long
+}
+
+/** Closed window symbol; still uses the previous geometry until its own redesign. */
+data class WindowOpening(
+    override val offsetMm: Long,
+    override val holeLengthMm: Long,
     val alignment: OpeningAlignment = OpeningAlignment.CENTER,
-    val frameWidthMm: Long = 0L,
-    val hingeAtStart: Boolean = true,
-    val swingTowardWall: Boolean = false,
-    val openingAngleDegrees: Int = 90
-)
+    val frameDepthMm: Long
+) : WallOpening {
+    init {
+        require(offsetMm >= 0L) { "La posición de la ventana no puede ser negativa." }
+        require(holeLengthMm > 0L) { "El ancho de la ventana debe ser mayor que cero." }
+        require(frameDepthMm > 0L) { "La profundidad de la ventana debe ser mayor que cero." }
+    }
+}
 
 data class PlanNote(
     val text: String,
@@ -385,16 +393,22 @@ object PlanGeometry {
         val ranges = mutableListOf<Pair<Double, Double>>()
         segment.openings.sortedBy { it.offsetMm }.forEach { opening ->
             if (opening.offsetMm > start) ranges += start to opening.offsetMm.toDouble()
-            start = opening.offsetMm.toDouble() + opening.lengthMm
+            start = opening.offsetMm.toDouble() + opening.holeLengthMm
         }
         if (start < length) ranges += start to length
         return ranges
     }
 
-    fun frameOffset(segment: WallSegment, opening: WallOpening): Double = when (opening.alignment) {
-        OpeningAlignment.NEAR_FACE -> 0.0
-        OpeningAlignment.FAR_FACE -> (segment.widthMm - opening.frameWidthMm).toDouble()
-        OpeningAlignment.CENTER -> (segment.widthMm - opening.frameWidthMm) / 2.0
+    fun frameDepth(opening: WindowOpening): Long = opening.frameDepthMm
+
+    /** Near edge of the window frame measured from the wall's near face. */
+    fun frameOffset(segment: WallSegment, opening: WindowOpening): Double {
+        val depth = frameDepth(opening)
+        return when (opening.alignment) {
+            OpeningAlignment.NEAR_FACE -> 0.0
+            OpeningAlignment.FAR_FACE -> (segment.widthMm - depth).toDouble()
+            OpeningAlignment.CENTER -> (segment.widthMm - depth) / 2.0
+        }
     }
 
     fun validateOpenings(segment: WallSegment) {
@@ -403,18 +417,18 @@ object PlanGeometry {
         val length = hypot(segment.end.x - segment.start.x, segment.end.y - segment.start.y)
         var previousEnd = 0.0
         segment.openings.sortedBy { it.offsetMm }.forEach { opening ->
-            require(opening.lengthMm > 0 && opening.offsetMm >= 0 &&
-                opening.lengthMm < length && opening.offsetMm.toDouble() + opening.lengthMm <= length + 1e-6) {
+            val hole = opening.holeLengthMm
+            require(hole > 0L && hole < length &&
+                opening.offsetMm.toDouble() + hole <= length + 1e-6) {
                 "El vano debe caber dentro del muro."
             }
             require(opening.offsetMm >= previousEnd - 1e-6) { "Los vanos no pueden superponerse." }
-            require(opening.frameWidthMm >= 0 && opening.frameWidthMm <= segment.widthMm &&
-                (opening.kind != OpeningKind.WINDOW || opening.frameWidthMm > 0) &&
-                (opening.kind != OpeningKind.DOOR || opening.frameWidthMm == 0L)) {
-                "El ancho de la ventana debe caber entre las caras del muro."
+            if (opening is WindowOpening) {
+                require(opening.frameDepthMm <= segment.widthMm) {
+                    "El ancho de la ventana debe caber entre las caras del muro."
+                }
             }
-            require(opening.openingAngleDegrees in 1..180) { "El ángulo de apertura debe estar entre 1° y 180°." }
-            previousEnd = opening.offsetMm.toDouble() + opening.lengthMm
+            previousEnd = opening.offsetMm.toDouble() + hole
         }
     }
 
